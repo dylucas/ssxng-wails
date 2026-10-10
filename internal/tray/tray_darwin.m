@@ -16,6 +16,7 @@ static NSMenu *gMenu = nil;
 - (void)selectMode:(id)sender;
 - (void)showWindow:(id)sender;
 - (void)quitApp:(id)sender;
+- (void)copyCommand:(id)sender;
 @end
 
 @implementation SSXNGTrayTarget
@@ -41,6 +42,22 @@ static NSMenu *gMenu = nil;
     ssxngTrayEvent(4, NULL);
 }
 
+/* Write the command straight to the pasteboard. Doing it here (instead of
+   round-tripping through the frontend) keeps the menu item working when the
+   window is hidden or the webview is not up yet; the event is only a
+   notification so Go can log it and toast. */
+- (void)copyCommand:(id)sender {
+    NSMenuItem *item = (NSMenuItem *)sender;
+    NSString *command = [item representedObject];
+    if (command == nil || [command length] == 0) {
+        return;
+    }
+    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+    [pasteboard clearContents];
+    [pasteboard setString:command forType:NSPasteboardTypeString];
+    ssxngTrayEvent(5, (char *)[command UTF8String]);
+}
+
 @end
 
 static SSXNGTrayTarget *gTarget = nil;
@@ -52,9 +69,22 @@ static NSString *ssxngCString(const char *s) {
     return [NSString stringWithUTF8String:s] ?: @"";
 }
 
-/* A small template image (paper plane), so the icon adapts to the menu bar
-   appearance and to the highlighted state. */
-static NSImage *ssxngMakeIcon(void) {
+/* The status item icon: an 18x18 template paper plane. A template image is
+   rendered by macOS from its alpha channel alone, so it follows the menu bar
+   appearance (black on a light bar, white on a dark one) and inverts when the
+   item is highlighted — which is exactly why the on/off difference has to live
+   in the shape rather than in a colour.
+
+   On  = filled silhouette.
+   Off = the same silhouette, stroked and unfilled, so it reads as "hollow".
+
+   Both are cached for the lifetime of the process: the plane never changes, and
+   Refresh runs on every state change. The globals hold the +1 from alloc, the
+   same way gItem/gMenu do. */
+static NSImage *gIconOn = nil;
+static NSImage *gIconOff = nil;
+
+static NSImage *ssxngMakeIcon(BOOL enabled) {
     NSSize size = NSMakeSize(18.0, 18.0);
     NSImage *image = [[NSImage alloc] initWithSize:size];
     [image lockFocus];
@@ -64,11 +94,30 @@ static NSImage *ssxngMakeIcon(void) {
     [path lineToPoint:NSMakePoint(11.0, 2.5)];
     [path lineToPoint:NSMakePoint(8.5, 8.0)];
     [path closePath];
-    [[NSColor blackColor] setFill];
-    [path fill];
+    if (enabled) {
+        [[NSColor blackColor] setFill];
+        [path fill];
+    } else {
+        // Round joins keep the two sharp corners of the plane from spiking; the
+        // stroke straddles the path, so it still fits inside the 18x18 box.
+        [path setLineWidth:1.5];
+        [path setLineJoinStyle:NSLineJoinStyleRound];
+        [[NSColor blackColor] setStroke];
+        [path stroke];
+    }
     [image unlockFocus];
     [image setTemplate:YES];
     return image;
+}
+
+/* The icon to show for a given proxy state. Split out so the check script can
+   assert the two states really do produce different images. */
+static NSImage *ssxngIconForEnabled(BOOL enabled) {
+    NSImage **slot = enabled ? &gIconOn : &gIconOff;
+    if (*slot == nil) {
+        *slot = ssxngMakeIcon(enabled);
+    }
+    return *slot;
 }
 
 static NSMenuItem *ssxngMakeItem(NSString *title, SEL action) {
@@ -77,7 +126,40 @@ static NSMenuItem *ssxngMakeItem(NSString *title, SEL action) {
     return item;
 }
 
-static void ssxngBuildMenu(NSString *status, NSString *currentMode, NSString *modesSpec, BOOL enabled) {
+/* One "key|title|command" line per copy item. Everything after the second
+   separator is the command, so a command containing "|" still survives. */
+static NSArray *ssxngParseCommand(NSString *line) {
+    NSArray *parts = [line componentsSeparatedByString:@"|"];
+    if ([parts count] < 3) {
+        return nil;
+    }
+    NSArray *rest = [parts subarrayWithRange:NSMakeRange(2, [parts count] - 2)];
+    return @[ [parts objectAtIndex:1], [rest componentsJoinedByString:@"|"] ];
+}
+
+/* The copy-command menu items. Each one carries its text as representedObject,
+   which is exactly what copyCommand: writes to the pasteboard. Split out from
+   ssxngBuildMenu so it can be exercised without a status bar; the assertions
+   live in scripts/tray-check.sh. */
+static NSArray *ssxngCommandItems(NSString *commandsSpec) {
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *line in [commandsSpec componentsSeparatedByString:@"\n"]) {
+        if ([line length] == 0) {
+            continue;
+        }
+        NSArray *parsed = ssxngParseCommand(line);
+        if (parsed == nil) {
+            continue;
+        }
+        NSMenuItem *item = ssxngMakeItem([parsed objectAtIndex:0], @selector(copyCommand:));
+        [item setRepresentedObject:[parsed objectAtIndex:1]];
+        [items addObject:item];
+    }
+    return items;
+}
+
+static void ssxngBuildMenu(NSString *status, NSString *currentMode, NSString *modesSpec,
+                           NSString *commandsSpec, BOOL enabled) {
     if (gItem == nil) {
         return;
     }
@@ -111,6 +193,16 @@ static void ssxngBuildMenu(NSString *status, NSString *currentMode, NSString *mo
         [gMenu addItem:item];
     }
 
+    /* Copy-command items. They are ordinary items (one click, no submenu) so the
+       text lands on the pasteboard the moment the user picks it. */
+    NSArray *commandItems = ssxngCommandItems(commandsSpec);
+    if ([commandItems count] > 0) {
+        [gMenu addItem:[NSMenuItem separatorItem]];
+        for (NSMenuItem *item in commandItems) {
+            [gMenu addItem:item];
+        }
+    }
+
     [gMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *show = ssxngMakeItem(@"显示主窗口", @selector(showWindow:));
     [show setKeyEquivalent:@"o"];
@@ -140,10 +232,12 @@ int ssxngTrayStart(void) {
         [gItem retain];
         NSButton *button = [gItem button];
         if (button != nil) {
-            [button setImage:ssxngMakeIcon()];
+            // Off until a Refresh says otherwise; ssxngTrayStart calls one right
+            // away, so this only covers the instant before it lands.
+            [button setImage:ssxngIconForEnabled(NO)];
             [button setToolTip:@"SSXNG"];
         }
-        ssxngBuildMenu(@"SSXNG", @"", @"", NO);
+        ssxngBuildMenu(@"SSXNG", @"", @"", @"", NO);
     };
 
     if ([NSThread isMainThread]) {
@@ -154,11 +248,12 @@ int ssxngTrayStart(void) {
     return result;
 }
 
-void ssxngTrayRefresh(const char *title, const char *status, const char *currentMode, const char *modesSpec, int enabled) {
+void ssxngTrayRefresh(const char *title, const char *status, const char *currentMode, const char *modesSpec, const char *commandsSpec, int enabled) {
     NSString *nsTitle = ssxngCString(title);
     NSString *nsStatus = ssxngCString(status);
     NSString *nsMode = ssxngCString(currentMode);
     NSString *nsModes = ssxngCString(modesSpec);
+    NSString *nsCommands = ssxngCString(commandsSpec);
     BOOL on = enabled != 0;
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gItem == nil) {
@@ -166,9 +261,11 @@ void ssxngTrayRefresh(const char *title, const char *status, const char *current
         }
         NSButton *button = [gItem button];
         if (button != nil) {
+            // 代理开关一变，菜单栏图标就跟着变：实心=开启，空心=关闭。
+            [button setImage:ssxngIconForEnabled(on)];
             [button setToolTip:nsTitle];
         }
-        ssxngBuildMenu(nsStatus, nsMode, nsModes, on);
+        ssxngBuildMenu(nsStatus, nsMode, nsModes, nsCommands, on);
     });
 }
 

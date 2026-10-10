@@ -32,7 +32,6 @@ type proxyApplier struct {
 	last      appliedProxy
 	hasLast   bool
 	lastErr   string
-	lastAt    time.Time
 	attemptAt time.Time
 }
 
@@ -58,7 +57,6 @@ type appliedProxy struct {
 	PACURL   string
 	Socks    string
 	HTTP     string
-	At       time.Time
 }
 
 func (p *proxyApplier) lastApplied() (appliedProxy, bool) {
@@ -78,7 +76,6 @@ func (p *proxyApplier) record(a appliedProxy) {
 	p.last = a
 	p.hasLast = true
 	p.lastErr = ""
-	p.lastAt = time.Now()
 	p.mu.Unlock()
 }
 
@@ -97,7 +94,7 @@ func (a *App) desiredProxy() (mode, pacURL string, services []string, err error)
 	case config.ModeGlobal:
 		return "global", "", all, nil
 	case config.ModeAuto:
-		u, uerr := a.pacURLFor(sett)
+		u, uerr := a.pacURLFor()
 		if uerr != nil {
 			return "", "", nil, uerr
 		}
@@ -124,7 +121,7 @@ func (a *App) desiredProxy() (mode, pacURL string, services []string, err error)
 
 // pacURLFor builds the local PAC URL including a cache buster, because macOS
 // caches PAC files very aggressively.
-func (a *App) pacURLFor(sett config.Settings) (string, error) {
+func (a *App) pacURLFor() (string, error) {
 	if a.pacSrv == nil || !a.pacSrv.Running() {
 		return "", fmt.Errorf("PAC 服务器未运行")
 	}
@@ -282,7 +279,6 @@ func (p *proxyApplier) reconcile(reason string) error {
 		Services: resp.Applied,
 		PACURL:   pacURL,
 		Socks:    proxyconf.FormatPort(sett.SOCKS.Address, sett.SOCKS.Port),
-		At:       time.Now(),
 	}
 	if sett.HTTP.Enabled {
 		applied.HTTP = proxyconf.FormatPort(sett.HTTP.Address, sett.HTTP.Port)
@@ -292,14 +288,8 @@ func (p *proxyApplier) reconcile(reason string) error {
 	}
 	p.record(applied)
 
+	// mode is never "off" here: reconcile returns through reconcileOff above.
 	switch {
-	case mode == "off" && len(applied.Services) == 0:
-		// Nothing of ours was in the way, which is normal in manual mode and
-		// after a restart. Worth stating plainly: "off" here is a decision, not
-		// a failure.
-		p.app.logf("info", "proxy", "未改动系统代理（%s）：没有需要清理的设置", reason)
-	case mode == "off":
-		p.app.logf("info", "proxy", "已关闭系统代理（%s）：%s", reason, describeServices(applied.Services))
 	case mode == "auto":
 		p.app.logf("info", "proxy", "已启用 PAC 自动代理（%s）：%s -> %s", reason, describeServices(applied.Services), stripCacheBuster(pacURL))
 	default:
@@ -324,7 +314,7 @@ func (p *proxyApplier) reconcileOff(reason string, sett config.Settings, service
 		// a failure.
 		p.app.logf("info", "proxy", "未改动系统代理（%s）：没有需要清理的设置", reason)
 	default:
-		p.record(appliedProxy{Mode: "off", Services: cleared, At: time.Now()})
+		p.record(appliedProxy{Mode: "off", Services: cleared})
 		p.app.logf("info", "proxy", "已关闭系统代理（%s）：%s", reason, describeServices(cleared))
 	}
 	return nil
@@ -472,7 +462,7 @@ func (p *proxyApplier) forceOff(reason string) {
 		return
 	}
 	p.app.logf("info", "proxy", "退出前已清理系统代理（%s）：%s", reason, describeServices(cleared))
-	p.record(appliedProxy{Mode: "off", Services: cleared, At: time.Now()})
+	p.record(appliedProxy{Mode: "off", Services: cleared})
 }
 
 // exceptionList is the bypass list handed to the helper. Settings.ExceptionList

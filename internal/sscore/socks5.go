@@ -26,10 +26,18 @@ const (
 	repAddrNotSupported = 8
 )
 
-var errSocksUDPUnsupported = errors.New("暂不支持 SOCKS5 UDP ASSOCIATE")
+// errSocksUDPUnsupported is returned when the client asks for UDP ASSOCIATE but
+// the relay is switched off in the settings.
+var errSocksUDPUnsupported = errors.New("SOCKS5 UDP ASSOCIATE 已关闭")
 
-// socksRequest is a parsed SOCKS5 CONNECT request.
+// socksRequest is a parsed SOCKS5 request.
 type socksRequest struct {
+	Cmd byte // cmdConnect or cmdUDPAssoc
+
+	// Target is the address in the request. For CONNECT it is the destination;
+	// for UDP ASSOCIATE it is the address the client claims it will send
+	// datagrams from, which RFC 1928 allows to be all zeros and which almost
+	// every client leaves empty. Ignored for UDP.
 	Target string // host:port, IPv6 hosts are wrapped in brackets
 }
 
@@ -66,12 +74,10 @@ func readSocksRequest(rw io.ReadWriter) (socksRequest, error) {
 	if head[0] != socksVersion {
 		return req, fmt.Errorf("不支持的 SOCKS 版本 %d", head[0])
 	}
-	if head[1] != cmdConnect {
+	req.Cmd = head[1]
+	if req.Cmd != cmdConnect && req.Cmd != cmdUDPAssoc {
 		if _, err := rw.Write(replyBytes(repCmdNotSupported)); err != nil {
 			return req, err
-		}
-		if head[1] == cmdUDPAssoc {
-			return req, errSocksUDPUnsupported
 		}
 		return req, fmt.Errorf("不支持的 SOCKS5 命令 %d", head[1])
 	}
@@ -86,7 +92,9 @@ func readSocksRequest(rw io.ReadWriter) (socksRequest, error) {
 		return req, err
 	}
 	port := binary.BigEndian.Uint16(portBuf)
-	if port == 0 {
+	// A CONNECT to port 0 is meaningless; a UDP ASSOCIATE carrying 0.0.0.0:0 is
+	// the normal case (the client cannot know its source port in advance).
+	if port == 0 && req.Cmd == cmdConnect {
 		_, _ = rw.Write(replyBytes(repHostUnreach))
 		return req, errors.New("目标端口为 0")
 	}
@@ -123,9 +131,36 @@ func readSocksHost(r io.Reader, atyp byte) (string, error) {
 	}
 }
 
-// replyBytes builds a SOCKS5 reply for the CONNECT command.
-func replyBytes(rep byte) []byte {
-	return []byte{socksVersion, rep, 0, atypIPv4, 0, 0, 0, 0, 0, 0}
+// replyBytes builds a SOCKS5 reply with an all-zero BND.ADDR/BND.PORT, which is
+// all CONNECT needs: the client never reads the bound address back.
+func replyBytes(rep byte) []byte { return replyBytesAddr(rep, "") }
+
+// replyBytesAddr builds a SOCKS5 reply whose BND.ADDR/BND.PORT is addr. UDP
+// ASSOCIATE must use this: the address in the reply is where the client has to
+// send its datagrams, so an all-zero reply leaves it with nowhere to go.
+//
+// An unparseable or empty addr falls back to 0.0.0.0:0.
+func replyBytesAddr(rep byte, addr string) []byte {
+	out := []byte{socksVersion, rep, 0, atypIPv4, 0, 0, 0, 0, 0, 0}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return out
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return out
+	}
+	if ip4 := net.ParseIP(host).To4(); ip4 != nil {
+		copy(out[4:8], ip4)
+		out[8], out[9] = byte(port>>8), byte(port)
+		return out
+	}
+	if ip6 := net.ParseIP(host).To16(); ip6 != nil {
+		out = []byte{socksVersion, rep, 0, atypIPv6}
+		out = append(out, ip6...)
+		return append(out, byte(port>>8), byte(port))
+	}
+	return out
 }
 
 // replyForError maps a dial error onto a SOCKS5 reply code.

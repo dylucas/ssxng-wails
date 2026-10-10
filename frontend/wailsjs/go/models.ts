@@ -230,6 +230,7 @@ export namespace api {
 	    httpAddress: string;
 	    httpPort: number;
 	    httpFollowGlobal: boolean;
+	    udpEnabled: boolean;
 	    pacAddress: string;
 	    pacPort: number;
 	    pacBindLocalhost: boolean;
@@ -259,6 +260,7 @@ export namespace api {
 	        this.httpAddress = source["httpAddress"];
 	        this.httpPort = source["httpPort"];
 	        this.httpFollowGlobal = source["httpFollowGlobal"];
+	        this.udpEnabled = source["udpEnabled"];
 	        this.pacAddress = source["pacAddress"];
 	        this.pacPort = source["pacPort"];
 	        this.pacBindLocalhost = source["pacBindLocalhost"];
@@ -306,6 +308,7 @@ export namespace api {
 	    modes: string[];
 	    socks: ListenerView;
 	    http: ListenerView;
+	    udp: ListenerView;
 	    pac: PACView;
 	    server?: ServerView;
 	    servers: ServerView[];
@@ -327,6 +330,7 @@ export namespace api {
 	        this.modes = source["modes"];
 	        this.socks = this.convertValues(source["socks"], ListenerView);
 	        this.http = this.convertValues(source["http"], ListenerView);
+	        this.udp = this.convertValues(source["udp"], ListenerView);
 	        this.pac = this.convertValues(source["pac"], PACView);
 	        this.server = this.convertValues(source["server"], ServerView);
 	        this.servers = this.convertValues(source["servers"], ServerView);

@@ -96,6 +96,12 @@ type Settings struct {
 	HTTP  HTTPListener `json:"http"`
 	PAC   PACServer    `json:"pac"`
 
+	// UDPEnabled turns on the SOCKS5 UDP ASSOCIATE relay. It is a plain bool
+	// with a true default: Open() unmarshals the file *over* DefaultSettings(),
+	// so a config written before this field existed keeps UDP on. The relay
+	// shares the SOCKS listener's port (TCP and UDP are separate namespaces).
+	UDPEnabled bool `json:"udpEnabled"`
+
 	Exceptions                   string      `json:"exceptions"`
 	AutoConfigureNetworkServices bool        `json:"autoConfigureNetworkServices"`
 	NetworkServices              []string    `json:"networkServices"`
@@ -114,11 +120,12 @@ type Settings struct {
 // ShadowsocksX-NG (socks 1086, http 1087, pac 1089).
 func DefaultSettings() Settings {
 	return Settings{
-		Version: 1,
-		Enabled: false, // stays off until at least one server exists
-		Mode:    ModeAuto,
-		SOCKS:   Listener{Address: "127.0.0.1", Port: 1086},
-		HTTP:    HTTPListener{Enabled: true, Address: "127.0.0.1", Port: 1087, FollowGlobal: false},
+		Version:    1,
+		Enabled:    false, // stays off until at least one server exists
+		Mode:       ModeAuto,
+		SOCKS:      Listener{Address: "127.0.0.1", Port: 1086},
+		HTTP:       HTTPListener{Enabled: true, Address: "127.0.0.1", Port: 1087, FollowGlobal: false},
+		UDPEnabled: true,
 		PAC: PACServer{
 			Address:         "127.0.0.1",
 			Port:            1089,

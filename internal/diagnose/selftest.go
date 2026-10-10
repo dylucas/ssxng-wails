@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -112,6 +113,7 @@ func SelfTest(c Context) (rep Report) {
 		Server:      profile,
 		SocksAddr:   "127.0.0.1:0",
 		HTTPAddr:    "127.0.0.1:0",
+		UDPAddr:     "127.0.0.1:0",
 		DialTimeout: 5 * time.Second,
 	}); err != nil {
 		add("启动临时代理", false, err.Error())
@@ -119,7 +121,8 @@ func SelfTest(c Context) (rep Report) {
 	}
 	defer eng.Stop()
 	socksAddr, httpAddr := eng.Addresses()
-	add("启动临时代理", true, fmt.Sprintf("SOCKS %s，HTTP %s", socksAddr, httpAddr))
+	udpAddr := eng.UDPAddr()
+	add("启动临时代理", true, fmt.Sprintf("SOCKS %s，HTTP %s，UDP %s", socksAddr, httpAddr, udpAddr))
 
 	socksClient := &http.Client{
 		Transport: &http.Transport{DialContext: socks5Dialer(socksAddr)},
@@ -146,7 +149,21 @@ func SelfTest(c Context) (rep Report) {
 	body, err = fetch(proxyClient, tlsEcho.URL+"/connect")
 	add("HTTPS CONNECT 隧道", err == nil && body == echoBody, describe(err, fmt.Sprintf("收到 %q", truncate(body))))
 
-	// 8. payload integrity across many cipher chunks
+	// 8. UDP ASSOCIATE: the relay must carry a datagram to a UDP echo server
+	// through the tunnel and bring the reply back with its SOCKS5 header.
+	udpEcho, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		add("启动 UDP 回声服务端", false, err.Error())
+	} else {
+		defer udpEcho.Close()
+		go udpEchoLoop(udpEcho)
+		add("启动 UDP 回声服务端", true, udpEcho.LocalAddr().String())
+		body, err := udpRoundTrip(socksAddr, udpEcho.LocalAddr().String(), []byte(echoBody))
+		add("UDP 转发", err == nil && body == "udp:"+echoBody,
+			describe(err, fmt.Sprintf("收到 %q", truncate(body))))
+	}
+
+	// 9. payload integrity across many cipher chunks
 	payload := make([]byte, 256<<10)
 	if _, err := rand.Read(payload); err != nil {
 		add("大数据完整性（256 KiB）", false, err.Error())
@@ -162,7 +179,7 @@ func SelfTest(c Context) (rep Report) {
 		}
 	}
 
-	// 9. shutdown leaves nothing behind
+	// 10. shutdown leaves nothing behind
 	eng.Stop()
 	srv.Close()
 	ok := true
@@ -176,8 +193,126 @@ func SelfTest(c Context) (rep Report) {
 		}
 		_ = ln.Close()
 	}
+	// The UDP relay shares the SOCKS port; it must be released too, or a restart
+	// would fail to bind.
+	if ok {
+		pc, err := net.ListenPacket("udp", udpAddr)
+		if err != nil {
+			ok = false
+			detail = fmt.Sprintf("UDP 端口 %s 未释放: %v", udpAddr, err)
+		} else {
+			_ = pc.Close()
+		}
+	}
 	add("清理", ok, detail)
 	return
+}
+
+// udpEchoLoop answers every datagram with a "udp:" prefix, so the self test can
+// tell a reply apart from its own request.
+func udpEchoLoop(pc net.PacketConn) {
+	buf := make([]byte, 64<<10)
+	for {
+		n, from, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		out := append([]byte("udp:"), buf[:n]...)
+		if _, err := pc.WriteTo(out, from); err != nil {
+			return
+		}
+	}
+}
+
+// udpRoundTrip runs a complete SOCKS5 UDP ASSOCIATE exchange: greeting,
+// associate, one datagram to target, and the reply payload back.
+//
+// It is a plain, independent client implementation on purpose. Routing the self
+// test through the engine's own UDP client code would let a bug there hide
+// itself, which is exactly what this test exists to catch.
+func udpRoundTrip(socksAddr, target string, payload []byte) (string, error) {
+	ctrl, err := net.DialTimeout("tcp", socksAddr, 5*time.Second)
+	if err != nil {
+		return "", err
+	}
+	// The association lives on this connection, so it stays open for the whole
+	// exchange.
+	defer ctrl.Close()
+	_ = ctrl.SetDeadline(time.Now().Add(10 * time.Second))
+
+	// Greeting: version 5, one method, "no authentication".
+	if _, err := ctrl.Write([]byte{5, 1, 0}); err != nil {
+		return "", err
+	}
+	method := make([]byte, 2)
+	if _, err := io.ReadFull(ctrl, method); err != nil {
+		return "", err
+	}
+	if method[0] != 5 || method[1] != 0 {
+		return "", fmt.Errorf("SOCKS5 方法协商失败: %v", method)
+	}
+	// UDP ASSOCIATE with 0.0.0.0:0: our source port does not exist yet.
+	if _, err := ctrl.Write([]byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
+		return "", err
+	}
+	// VER, REP, RSV: the address type is left for socks.ReadAddr, which expects
+	// to read it itself.
+	head := make([]byte, 3)
+	if _, err := io.ReadFull(ctrl, head); err != nil {
+		return "", err
+	}
+	if head[0] != 5 {
+		return "", fmt.Errorf("SOCKS5 应答版本错误: %d", head[0])
+	}
+	if head[1] != 0 {
+		return "", fmt.Errorf("UDP ASSOCIATE 被拒绝: REP=%d", head[1])
+	}
+	bound, err := socks.ReadAddr(ctrl)
+	if err != nil {
+		return "", fmt.Errorf("读取应答地址失败: %w", err)
+	}
+	relay, err := net.ResolveUDPAddr("udp", bound.String())
+	if err != nil {
+		return "", fmt.Errorf("应答地址无效 %q: %w", bound.String(), err)
+	}
+	if relay.Port == 0 {
+		return "", errors.New("应答的 BND.PORT 为 0，客户端无处可发")
+	}
+
+	tgt := socks.ParseAddr(target)
+	if tgt == nil {
+		return "", fmt.Errorf("目标地址无效: %s", target)
+	}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	defer pc.Close()
+
+	pkt := make([]byte, 0, 3+len(tgt)+len(payload))
+	pkt = append(pkt, 0, 0, 0) // RSV(2) + FRAG(1)
+	pkt = append(pkt, tgt...)
+	pkt = append(pkt, payload...)
+	if _, err := pc.WriteTo(pkt, relay); err != nil {
+		return "", err
+	}
+	_ = pc.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 64<<10)
+	n, _, err := pc.ReadFrom(buf)
+	if err != nil {
+		return "", err
+	}
+	if n < 4 {
+		return "", fmt.Errorf("UDP 应答过短: %d 字节", n)
+	}
+	if buf[0] != 0 || buf[1] != 0 || buf[2] != 0 {
+		return "", fmt.Errorf("UDP 应答的 RSV/FRAG 应为 0: %v", buf[:3])
+	}
+	src := socks.SplitAddr(buf[3:n])
+	if src == nil {
+		return "", errors.New("UDP 应答的地址无法解析")
+	}
+	return string(buf[3+len(src) : n]), nil
 }
 
 func echoHandler(w http.ResponseWriter, r *http.Request) {

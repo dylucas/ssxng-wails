@@ -19,23 +19,6 @@ const HelperInstallPath = HelperInstallDir + "/ssxng-helper"
 // HelperStatePath is the root-owned snapshot file the helper keeps.
 const HelperStatePath = HelperInstallDir + "/proxy-state.json"
 
-// Request is the JSON description of a helper invocation. The command line
-// form is documented in docs/HELPER.md; this struct is what the GUI sends when
-// it needs structured output.
-type Request struct {
-	Mode         string   `json:"mode,omitempty"`
-	PACURL       string   `json:"pacUrl,omitempty"`
-	Port         int      `json:"port,omitempty"`
-	SocksHost    string   `json:"socksListenAddress,omitempty"`
-	HTTPPort     int      `json:"httpPort,omitempty"`
-	HTTPHost     string   `json:"httpListenAddress,omitempty"`
-	Services     []string `json:"networkServices,omitempty"`
-	Exceptions   []string `json:"proxyExceptions,omitempty"`
-	ListServices bool     `json:"listServices,omitempty"`
-	DryRun       bool     `json:"dryRun,omitempty"`
-	StatePath    string   `json:"statePath,omitempty"`
-}
-
 // ServiceInfo is one row of --list-services.
 type ServiceInfo struct {
 	Service
@@ -48,7 +31,6 @@ type ServiceInfo struct {
 type Response struct {
 	OK       bool          `json:"ok"`
 	Version  string        `json:"version,omitempty"`
-	Mode     string        `json:"mode,omitempty"`
 	Applied  []string      `json:"applied,omitempty"`
 	Skipped  []string      `json:"skipped,omitempty"`
 	Commands []string      `json:"commands,omitempty"`

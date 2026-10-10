@@ -28,16 +28,6 @@ func PlistPath(label string) (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents", label+".plist"), nil
 }
 
-// IsEnabled reports whether the login item is installed.
-func IsEnabled(label string) bool {
-	path, err := PlistPath(label)
-	if err != nil {
-		return false
-	}
-	_, err = os.Stat(path)
-	return err == nil
-}
-
 // SetEnabled installs or removes the login item.
 func SetEnabled(enabled bool, label, execPath string) error {
 	if strings.TrimSpace(execPath) == "" {

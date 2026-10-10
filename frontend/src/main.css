@@ -110,7 +110,8 @@ body {
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
-    /* 原生 App 的观感：界面文字不可选中，只有内容区可以（见文件末尾的 .selectable 规则） */
+    /* 原生 App 的观感：界面文字默认不可选中，需要复制的内容
+       （.mono / .offline-text 等，以及 .cli-cmd）再单独开启 user-select: text。 */
     cursor: default;
     -webkit-user-select: none;
     user-select: none;
@@ -564,10 +565,6 @@ a {
     height: 14px;
 }
 
-.is-busy {
-    cursor: progress;
-}
-
 .spinner {
     width: 12px;
     height: 12px;
@@ -862,12 +859,6 @@ a {
     color: var(--ok);
 }
 
-.stat-value small {
-    color: var(--text-3);
-    font-size: 11px;
-    font-weight: 400;
-}
-
 .kv {
     display: flex;
     align-items: baseline;
@@ -918,12 +909,6 @@ a {
 .server-line .title {
     font-size: 15px;
     font-weight: 600;
-}
-
-.server-line .addr {
-    color: var(--text-2);
-    font-family: var(--mono);
-    font-size: 12px;
 }
 
 .err-line {
@@ -1130,6 +1115,13 @@ a {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
     gap: 10px 12px;
+}
+
+/* 同一格里的多个开关竖排。用它是为了不因为多一个复选框就多出一整行网格。 */
+.check-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
 }
 
 .field {

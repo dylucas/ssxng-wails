@@ -8,7 +8,7 @@
 </head>
 
 <body>
-<div class="app" id="app">
+<div class="app">
 
     <!-- 窗口顶部标题栏：固定高度、可拖动（--wails-draggable: drag）。
          里面不放任何交互元素：该 CSS 自定义属性会继承，放了会吞掉点击。 -->
@@ -106,7 +106,7 @@
     </aside>
 
     <!-- ================= 主区域 ================= -->
-    <main class="main" id="main">
+    <main class="main">
         <div class="offline" hidden id="offline">
             <svg aria-hidden="true" class="offline-ico" fill="none" stroke="currentColor" stroke-linecap="round"
                  stroke-linejoin="round" stroke-width="1.7" viewBox="0 0 24 24">
@@ -175,7 +175,12 @@
     <div aria-live="polite" class="toasts" id="toasts"></div>
 </div>
 
+<!-- 加载顺序即依赖顺序；每个文件各自一个 IIFE，靠 window.SSXNG 互相引用。
+     只有 app.js 会产生副作用（绑定事件、首次拉取状态），必须放在最后。 -->
 <script defer src="/i18n.js"></script>
+<script defer src="/app-core.js"></script>
+<script defer src="/app-views.js"></script>
+<script defer src="/app-actions.js"></script>
 <script defer src="/app.js"></script>
 </body>
 </html>

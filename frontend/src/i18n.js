@@ -7,7 +7,6 @@
  */
 window.T = {
   app: {
-    name: 'SSXNG',
     subtitle: 'Shadowsocks for macOS',
     version: '版本'
   },
@@ -32,9 +31,6 @@ window.T = {
   },
 
   common: {
-    on: '开启',
-    off: '关闭',
-    enabled: '已启用',
     disabled: '已停用',
     active: '活动中',
     inactive: '未活动',
@@ -42,7 +38,6 @@ window.T = {
     selected: '当前使用',
     edit: '编辑',
     del: '删除',
-    copy: '复制',
     refresh: '刷新',
     cancel: '取消',
     save: '保存',
@@ -52,14 +47,12 @@ window.T = {
     loading: '处理中…',
     saving: '保存中…',
     applying: '应用中…',
-    testing: '测试中…',
     moveUp: '上移',
     moveDown: '下移',
     none: '无',
     unknown: '未知',
     yes: '是',
     no: '否',
-    empty: '暂无数据',
     ok: '正常',
     warn: '注意',
     fail: '失败',
@@ -67,8 +60,7 @@ window.T = {
     confirmDelete: '确定要删除服务器“{0}”吗？该操作不可撤销。',
     copied: '已复制到剪贴板',
     copyFailed: '复制失败，请手动复制',
-    dirtyNotice: '有未保存的修改，后端推送的状态不会覆盖表单。',
-    unknownError: '未知错误'
+    dirtyNotice: '有未保存的修改，后端推送的状态不会覆盖表单。'
   },
 
   status: {
@@ -97,6 +89,7 @@ window.T = {
     sessions: '累计会话',
     socks: 'SOCKS5',
     http: 'HTTP',
+    udp: 'UDP',
     pac: 'PAC',
     recentProxy: '最近代理记录',
     recentProxyEmpty: '暂无代理记录（来自 scope=proxy 的日志）',
@@ -149,7 +142,6 @@ window.T = {
     testing: '测试中…',
     testConn: '测试连接',
     saved: '服务器已保存',
-    deleted: '服务器已删除',
     selected: '已切换当前服务器',
     importOK: '导入成功：{0}',
     importEmpty: '请先粘贴 ss:// 链接',
@@ -157,8 +149,7 @@ window.T = {
     errPort: '端口必须是 1-65535 之间的整数',
     errPortLow: '提示：低于 1024 的端口很少见，请确认服务端确实在该端口监听。',
     errMethod: '请选择受支持的加密方式',
-    errPassword: '密码不能为空',
-    pluginUnsupported: '本客户端不支持插件节点'
+    errPassword: '密码不能为空'
   },
 
   modes: {
@@ -168,6 +159,8 @@ window.T = {
     listen: '本地监听',
     socksAddress: 'SOCKS 地址',
     socksPort: 'SOCKS 端口',
+    udpEnabled: '启用 UDP 转发（SOCKS5 UDP ASSOCIATE）',
+    udpEnabledHint: '让 QUIC、DNS 等 UDP 应用走代理；与 SOCKS 共用端口',
     httpEnabled: '启用 HTTP 代理',
     httpAddress: 'HTTP 地址',
     httpPort: 'HTTP 端口',
@@ -181,7 +174,6 @@ window.T = {
     cliSocks: 'SOCKS5',
     cliCopy: '复制命令',
     cliHTTPOff: 'HTTP 代理未启用，可在上面勾选“启用 HTTP 代理”。',
-    cliOn: '代理已开启，命令可直接使用。',
     cliOff: '代理当前未开启，命令需要先开启代理才有效。',
     cliStale: '监听地址有改动，保存并应用后命令才会更新。',
     switchModes: '菜单栏可切换的模式',
@@ -223,7 +215,6 @@ window.T = {
     source: '数据源',
     ruleSource: '规则来源',
     status: '状态',
-    lastError: '最近错误',
     never: '尚未生成',
     update: '从 GFWList 更新',
     updating: '正在下载并生成 PAC，请稍候…',
@@ -254,8 +245,7 @@ window.T = {
     openFolder: '打开配置目录',
     filter: '级别',
     all: '全部',
-    empty: '暂无日志',
-    follow: '自动滚动'
+    empty: '暂无日志'
   },
 
   diag: {
@@ -275,8 +265,7 @@ window.T = {
     colSuggestion: '建议',
     empty: '点击“运行诊断”开始检查本机环境。',
     selfTestEmpty: '点击“运行自检”执行一次端到端连通性测试。',
-    diagDone: '诊断完成：{0} 项检查',
-    selfTestDone: '自检结束'
+    diagDone: '诊断完成：{0} 项检查'
   },
 
   mode: {
@@ -306,13 +295,6 @@ window.T = {
     minutes: '分',
     hours: '小时',
     days: '天'
-  },
-
-  toast: {
-    info: '提示',
-    success: '成功',
-    warn: '警告',
-    error: '错误'
   },
 
   logLevel: {

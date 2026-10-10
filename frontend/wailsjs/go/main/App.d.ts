@@ -8,8 +8,6 @@ export function ApplySettings(arg1:api.SettingsView):Promise<void>;
 
 export function ClearLogs():Promise<void>;
 
-export function CycleMode():Promise<string>;
-
 export function DeleteServer(arg1:string):Promise<void>;
 
 export function Diagnose():Promise<Array<api.Check>>;
@@ -22,15 +20,11 @@ export function GetState():Promise<api.State>;
 
 export function HelperStatus():Promise<api.HelperStatus>;
 
-export function HideWindow():Promise<void>;
-
 export function ImportSSURL(arg1:string):Promise<api.ServerView>;
 
 export function InstallHelper():Promise<void>;
 
 export function ListNetworkServices():Promise<Array<api.NetworkService>>;
-
-export function ListServers():Promise<Array<api.ServerView>>;
 
 export function MoveServer(arg1:string,arg2:number):Promise<void>;
 
@@ -60,10 +54,6 @@ export function ShowWindow():Promise<void>;
 
 export function TestServer(arg1:string):Promise<void>;
 
-export function UninstallHelper():Promise<void>;
-
 export function UpdatePACFromGFWList():Promise<api.PACView>;
 
 export function UpdateServer(arg1:api.ServerView):Promise<void>;
-
-export function Version():Promise<string>;

@@ -4,7 +4,7 @@ APP_NAME := SSXNG
 APP_DIR := build/bin/$(APP_NAME).app
 HELPER := internal/helperbin/bin/ssxng-helper
 
-.PHONY: all build helper dev test vet fmt tidy app run clean sign uninstall
+.PHONY: all build helper dev test vet fmt tidy run clean sign uninstall ui-check tray-check
 
 all: build
 
@@ -31,6 +31,14 @@ test:
 vet:
 	go vet ./...
 
+## ui-check: headless UI regression check (no npm dependencies)
+ui-check:
+	scripts/ui-check.sh
+
+## tray-check: headless check of the Cocoa menu bar items
+tray-check:
+	scripts/tray-check.sh
+
 ## fmt: format all Go sources
 fmt:
 	gofmt -w .
@@ -52,9 +60,9 @@ sign:
 uninstall:
 	scripts/uninstall.sh $(if $(PURGE),--purge-config,)
 
-## clean: drop build output and the local build cache
+## clean: drop build output, the embedded helper and the local build caches
 clean:
-	rm -rf build/bin $(HELPER) .cache
+	rm -rf build/bin $(HELPER) .cache .gocache .gotmp build/ui-check
 
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## /  /'

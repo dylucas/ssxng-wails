@@ -1,4 +1,5 @@
-// Wails 运行时桩：让真实的 frontend/src/app.js 能在无后端时渲染出完整界面。
+// Wails 运行时桩：让真实的前端脚本（frontend/src/app-{core,views,actions}.js + app.js）
+// 能在无后端时渲染出完整界面。
 // 由 scripts/ui-check.sh 以 <script src="./stub.js"></script> 注入到 harness 页面的
 // deferred 脚本之前。
 //
@@ -15,6 +16,7 @@
         modes: ['auto', 'global', 'manual', 'externalPAC', 'off'],
         socks: {address: '127.0.0.1', port: 1086, active: true},
         http: {address: '127.0.0.1', port: 1087, active: true},
+        udp: {address: '127.0.0.1', port: 1086, active: true},
         pac: {
             address: '127.0.0.1', port: 1089, active: false,
             url: 'http://127.0.0.1:1089/proxy.pac', ruleCount: 8421, generatedAt: 1770000000,
@@ -47,6 +49,7 @@
         settings: {
             socksAddress: '127.0.0.1', socksPort: 1086,
             httpEnabled: true, httpAddress: '127.0.0.1', httpPort: 1087, httpFollowGlobal: false,
+            udpEnabled: true,
             pacAddress: '127.0.0.1', pacPort: 1089, pacBindLocalhost: true,
             gfwlistURL: 'https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt',
             externalPACURL: '',
@@ -85,6 +88,8 @@
     ];
 
     let calls = 0;
+    let callCounts = {};
+    let lastArgs = {};
     const respond = (value) => function () { calls++; return Promise.resolve(value); };
 
     window.__UI_FIXTURE = {state: state, logs: logs, checks: checks, selfTest: selfTest, services: services};
@@ -93,10 +98,8 @@
         main: {
             App: {
                 GetState: respond(state),
-                Version: respond('1.0.0'),
                 GetLogs: respond(logs),
                 ClearLogs: respond(null),
-                ListServers: respond(state.servers),
                 ListNetworkServices: respond(services),
                 HelperStatus: respond(state.helper),
                 Diagnose: respond(checks),
@@ -104,7 +107,6 @@
                 PACStatus: respond(state.pac),
                 UpdatePACFromGFWList: respond(state.pac),
                 TestServer: respond({ok: true, latencyMs: 128}),
-                GetSettings: respond(state.settings),
                 SaveSettings: respond(state.settings),
                 ApplySettings: respond(state.settings),
                 SetEnabled: respond(null),
@@ -119,13 +121,27 @@
                 SelectServer: respond(null),
                 MoveServer: respond(null),
                 InstallHelper: respond(null),
-                UninstallHelper: respond(null),
                 OpenUserRuleFile: respond(null),
                 OpenConfigFolder: respond(null),
+                ShowWindow: respond(null),
                 Quit: respond(null)
             }
         }
     };
+
+    // 每个后端方法单独计数：只统计总数看不出"连点两次只发了一次"这类回归。
+    // 包装放在对象建好之后，避免每加一个绑定方法都要记得改两处。
+    Object.keys(window.go.main.App).forEach(function (name) {
+        const fn = window.go.main.App[name];
+        window.go.main.App[name] = function () {
+            calls++;
+            callCounts[name] = (callCounts[name] || 0) + 1;
+            // 记下入参：只数调用次数看不出"存下去的字段对不对"，比如设置页
+            // 新加的开关有没有真的进 SaveSettings 的载荷。
+            lastArgs[name] = Array.prototype.slice.call(arguments);
+            return fn.apply(null, arguments);
+        };
+    });
 
     const listeners = {};
     window.runtime = {
@@ -147,6 +163,12 @@
         ClipboardGetText: function () { return Promise.resolve(window.__CLIPBOARD.text); }
     };
     window.__UI_CALLS = function () { return calls; };
+    window.__UI_CALL_COUNT = function (name) { return callCounts[name] || 0; };
+    // 返回入参的 JSON 文本，避免把桩内部的对象引用交给检查脚本去改。
+    window.__UI_LAST_ARGS = function (name) {
+        return lastArgs[name] ? JSON.stringify(lastArgs[name]) : null;
+    };
+    window.__UI_RESET_CALLS = function () { calls = 0; callCounts = {}; lastArgs = {}; };
 
     // 剪贴板记录器：headless Chrome 里 navigator.clipboard.writeText 未必可用，
     // 会悄悄回退到 execCommand，那样"点复制到底写进去了什么"就没法断言了。
@@ -192,5 +214,22 @@
         if (patch) Object.keys(patch).forEach(function (k) { next[k] = clone(patch[k]); });
         (listeners['ssxng:state'] || []).forEach(function (cb) { cb(next); });
         return true;
+    };
+
+    // 走真实的 ssxng:log 事件路径推送一条日志。日志去重、水位线和滚动位置
+    // 都只有在这个路径上才看得出来，直接改 fixture 是观察不到的。
+    window.__UI_PUSH_LOG = function (entry) {
+        const e = Object.assign({seq: 0, time: 1770000000, level: 'info', scope: 'app', message: 'x'}, entry);
+        (listeners['ssxng:log'] || []).forEach(function (cb) { cb(e); });
+        return true;
+    };
+
+    // 读取界面当前镜像的日志状态（条数 + 去重水位线），供 ui-check 断言。
+    window.__UI_LOG_STATE = function () {
+        const list = document.getElementById('log-list');
+        return {
+            count: document.querySelectorAll('#log-list .log-row').length,
+            scrolled: list ? list.scrollTop : -1
+        };
     };
 })();

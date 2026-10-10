@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 界面自检：用真实的前端文件（index.html / main.css / app.js / i18n.js）在
+# 界面自检：用真实的前端文件（index.html / main.css / i18n.js /
+# app-core.js / app-views.js / app-actions.js / app.js）在
 # 无头 Chromium 里渲染，检查标题栏与拖动区几何、横向溢出、文字对比度、
 # 六个视图是否渲染出内容。
 #
@@ -33,30 +34,36 @@ TMP="$(mktemp -d /tmp/ssxng-uicheck-XXXXXX)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
-cp "$SRC/main.css" "$SRC/app.js" "$SRC/i18n.js" "$TMP/"
+cp "$SRC/main.css" "$SRC/i18n.js" "$SRC/app-core.js" "$SRC/app-views.js" \
+   "$SRC/app-actions.js" "$SRC/app.js" "$TMP/"
 cp "$CHECK/stub.js" "$CHECK/metrics.js" "$TMP/"
 
 # 把 index.html 改造成可直接用 file:// 打开的 harness：
 #   - 绝对路径 /main.css 等换成相对路径
 #   - 在 deferred 脚本之前注入 Wails 运行时桩
-#   - 在 app.js 之后注入度量脚本
+#   - 在最后一个 app 脚本（app.js）之后注入度量脚本
 python3 - "$SRC/index.html" "$TMP/harness.html" <<'PY'
 import sys
 
 src, dst = sys.argv[1], sys.argv[2]
 html = open(src, encoding='utf-8').read()
-for asset in ('main.css', 'i18n.js', 'app.js'):
+# 资源文件名集中在这里；新增文件时同步改 ASSETS 与上面的 copy 列表即可。
+ASSETS = ('main.css', 'i18n.js', 'app-core.js', 'app-views.js', 'app-actions.js', 'app.js')
+for asset in ASSETS:
     html = html.replace('"/%s"' % asset, '"./%s"' % asset)
 html = html.replace('<script defer src="./i18n.js"></script>',
                     '<script src="./stub.js"></script>\n<script defer src="./i18n.js"></script>')
+# 度量脚本必须挂在最后：它读的是应用跑完之后的 DOM。
 html = html.replace('<script defer src="./app.js"></script>',
                     '<script defer src="./app.js"></script>\n<script defer src="./metrics.js"></script>')
 assert './stub.js' in html, '注入 stub.js 失败'
 assert './metrics.js' in html, '注入 metrics.js 失败'
 assert 'href="/' not in html and 'src="/' not in html, '仍有绝对路径资源引用'
+for asset in ASSETS[1:]:
+    assert '"./%s"' % asset in html, 'index.html 缺少脚本 %s' % asset
 open(dst, 'w', encoding='utf-8').write(html)
 PY
 
 export SSXNG_UI_SHOTS="${SSXNG_UI_SHOTS:-/tmp/ssxng-ui-shots}"
 mkdir -p "$SSXNG_UI_SHOTS"
-node "$CHECK/measure.js" "$TMP" "$CHROME"
+node "$CHECK/measure.js" "$TMP" "$CHROME" "$ROOT"

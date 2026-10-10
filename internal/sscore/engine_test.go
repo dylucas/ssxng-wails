@@ -348,14 +348,6 @@ func TestConcurrentConnections(t *testing.T) {
 	if st := rig.eng.Stats(); st.Sessions < n {
 		t.Errorf("会话计数偏低: %d", st.Sessions)
 	}
-	if conns := rig.eng.Connections(50); len(conns) < n {
-		t.Errorf("连接表记录不足: %d", len(conns))
-	}
-	for _, c := range rig.eng.Connections(50) {
-		if c.Err != "" {
-			t.Errorf("连接记录包含错误: %s %s", c.Target, c.Err)
-		}
-	}
 }
 
 // TestSOCKS5UnreachableServer checks the one failure the client *can* report:

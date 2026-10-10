@@ -14,10 +14,6 @@ export function ClearLogs() {
   return window['go']['main']['App']['ClearLogs']();
 }
 
-export function CycleMode() {
-  return window['go']['main']['App']['CycleMode']();
-}
-
 export function DeleteServer(arg1) {
   return window['go']['main']['App']['DeleteServer'](arg1);
 }
@@ -42,10 +38,6 @@ export function HelperStatus() {
   return window['go']['main']['App']['HelperStatus']();
 }
 
-export function HideWindow() {
-  return window['go']['main']['App']['HideWindow']();
-}
-
 export function ImportSSURL(arg1) {
   return window['go']['main']['App']['ImportSSURL'](arg1);
 }
@@ -56,10 +48,6 @@ export function InstallHelper() {
 
 export function ListNetworkServices() {
   return window['go']['main']['App']['ListNetworkServices']();
-}
-
-export function ListServers() {
-  return window['go']['main']['App']['ListServers']();
 }
 
 export function MoveServer(arg1, arg2) {
@@ -118,18 +106,10 @@ export function TestServer(arg1) {
   return window['go']['main']['App']['TestServer'](arg1);
 }
 
-export function UninstallHelper() {
-  return window['go']['main']['App']['UninstallHelper']();
-}
-
 export function UpdatePACFromGFWList() {
   return window['go']['main']['App']['UpdatePACFromGFWList']();
 }
 
 export function UpdateServer(arg1) {
   return window['go']['main']['App']['UpdateServer'](arg1);
-}
-
-export function Version() {
-  return window['go']['main']['App']['Version']();
 }

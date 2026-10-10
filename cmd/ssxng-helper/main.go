@@ -67,7 +67,7 @@ func main() {
 		emit(resp, 0)
 	}
 	if *listServices {
-		emit(listAll(*statePath), 0)
+		emit(listAll(), 0)
 	}
 
 	if *mode == "" {
@@ -216,7 +216,7 @@ func apply(mode string, o applyOptions, resp *proxyconf.Response) int {
 	return 0
 }
 
-func listAll(statePath string) proxyconf.Response {
+func listAll() proxyconf.Response {
 	resp := proxyconf.Response{Version: proxyconf.HelperVersion}
 	all, err := proxyconf.ListServices()
 	if err != nil {

@@ -37,6 +37,15 @@ func New(limit int) *Buffer {
 
 // Add appends a line and notifies subscribers without blocking.
 func (b *Buffer) Add(level, scope, message string) {
+	b.AddEntry(level, scope, message)
+}
+
+// AddEntry is Add, but it also returns the stored entry. Callers that need the
+// sequence number or the normalised level (the app stamps it into its file log
+// and the event it pushes to the UI) would otherwise have to read the ring back
+// with Entries(1), taking the lock a second time and allocating a slice for
+// every single line.
+func (b *Buffer) AddEntry(level, scope, message string) Entry {
 	level = strings.ToLower(strings.TrimSpace(level))
 	switch level {
 	case "debug", "info", "warn", "error":
@@ -64,6 +73,7 @@ func (b *Buffer) Add(level, scope, message string) {
 		default: // a slow subscriber must never block the caller
 		}
 	}
+	return e
 }
 
 // Entries returns up to limit of the most recent lines, oldest first.

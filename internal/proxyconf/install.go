@@ -147,12 +147,6 @@ chmod 4755 %s
 	return st, nil
 }
 
-// UninstallHelper removes the privileged helper and its state file.
-func UninstallHelper() error {
-	script := fmt.Sprintf("rm -rf %s\n", shellQuote(HelperInstallDir))
-	return runAsAdmin(script)
-}
-
 // verifySignature makes sure codesign considers the binary valid.
 func verifySignature(path string) error {
 	out, err := exec.Command("/usr/bin/codesign", "--verify", "--verbose=0", path).CombinedOutput()
@@ -211,35 +205,6 @@ func ExtractHelper(helperBytes []byte) (string, error) {
 		return "", err
 	}
 	return dst, nil
-}
-
-// CurrentProxyPorts is a convenience used by the diagnostics view: it reports
-// what the system currently points at for the first service that has a proxy
-// enabled.
-func CurrentProxyPorts() (socksPort, httpPort int, pacURL string) {
-	services, err := ListServices()
-	if err != nil {
-		return 0, 0, ""
-	}
-	for _, s := range services {
-		st, err := ReadState(s.Name)
-		if err != nil {
-			continue
-		}
-		if st.SocksEnabled && st.SocksPort != 0 {
-			socksPort = st.SocksPort
-		}
-		if st.WebEnabled && st.WebPort != 0 {
-			httpPort = st.WebPort
-		}
-		if st.AutoEnabled && st.AutoURL != "" {
-			pacURL = st.AutoURL
-		}
-		if socksPort != 0 || httpPort != 0 || pacURL != "" {
-			return socksPort, httpPort, pacURL
-		}
-	}
-	return 0, 0, ""
 }
 
 // FormatPort is a tiny helper used by the UI to render "host:port".

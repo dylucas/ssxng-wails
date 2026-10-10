@@ -48,12 +48,10 @@ func (e *Engine) forwardHTTP(client net.Conn, req *http.Request) error {
 	}
 	target = hostPort(target, "80")
 
-	id, _ := e.conns.begin(target)
 	cnt := &counters{globUp: &e.up, globDown: &e.down}
 
 	tunnel, err := e.tunnel(target)
 	if err != nil {
-		e.conns.end(id, 0, 0, err.Error())
 		writeHTTPError(client, http.StatusBadGateway, err.Error())
 		return err
 	}
@@ -73,22 +71,18 @@ func (e *Engine) forwardHTTP(client net.Conn, req *http.Request) error {
 	req.Header.Set("Connection", "close")
 
 	if err := req.Write(&countingWriter{w: tunnel, add: cnt.addUp}); err != nil {
-		e.conns.end(id, cnt.connUp.Load(), 0, err.Error())
 		return err
 	}
 
 	resp, err := http.ReadResponse(bufio.NewReader(tunnel), req)
 	if err != nil {
-		e.conns.end(id, cnt.connUp.Load(), 0, err.Error())
 		writeHTTPError(client, http.StatusBadGateway, err.Error())
 		return err
 	}
 	defer resp.Body.Close()
 	if err := resp.Write(&countingWriter{w: client, add: cnt.addDown}); err != nil {
-		e.conns.end(id, cnt.connUp.Load(), cnt.connDown.Load(), err.Error())
 		return err
 	}
-	e.conns.end(id, cnt.connUp.Load(), cnt.connDown.Load(), "")
 	return nil
 }
 
@@ -127,23 +121,4 @@ func writeHTTPError(w io.Writer, code int, msg string) {
 	body := msg + "\n"
 	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\nX-SSXNG-Error: 1\r\n\r\n%s",
 		code, http.StatusText(code), len(body), body)
-}
-
-// LocalPortsInUse reports whether the given host:port pairs can be bound. Used
-// by the UI to warn before starting.
-func LocalPortsInUse(addrs ...string) map[string]error {
-	out := make(map[string]error, len(addrs))
-	for _, a := range addrs {
-		if a == "" {
-			continue
-		}
-		ln, err := net.Listen("tcp", a)
-		if err != nil {
-			out[a] = err
-			continue
-		}
-		_ = ln.Close()
-		out[a] = nil
-	}
-	return out
 }

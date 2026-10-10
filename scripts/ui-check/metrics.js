@@ -129,8 +129,12 @@
         return out;
     }
 
-    // 侧栏在下、主区在上：拖拽、导航等固定元素也要检查
-    const KEY_SELECTORS = ['.nav-btn', '.nav-btn.is-active', '.log-time', '.log-msg', '.log-scope', '.power-label', '.power-state'];
+    // 侧栏在下、主区在上：拖拽、导航等固定元素也要检查。
+    // 这里的类名必须真的会出现在 DOM 上——选择器写错时 querySelectorAll 返回空，
+    // 对比度检查会静默少测几处，界面看起来仍然是"全部通过"。
+    const KEY_SELECTORS = ['.nav-btn', '.nav-btn.is-active', '.log-time', '.log-msg',
+        '.log-scope', '.hero-state', '.hero-sub', '.fact-label', '.fact-value',
+        '.stat-label', '.stat-value'];
 
     function keyRatios() {
         const out = [];

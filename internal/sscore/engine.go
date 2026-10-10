@@ -20,9 +20,13 @@ type Logger func(level, scope, message string)
 
 // Config is the runtime configuration of the engine.
 type Config struct {
-	Server      config.ServerProfile
-	SocksAddr   string // host:port the SOCKS5 proxy listens on
-	HTTPAddr    string // host:port the HTTP proxy listens on, empty to disable
+	Server    config.ServerProfile
+	SocksAddr string // host:port the SOCKS5 proxy listens on
+	HTTPAddr  string // host:port the HTTP proxy listens on, empty to disable
+	// UDPAddr is the host:port the SOCKS5 UDP ASSOCIATE relay listens on. Empty
+	// disables UDP entirely. TCP and UDP are separate port namespaces, so the
+	// usual value is the same host:port as SocksAddr.
+	UDPAddr     string
 	DialTimeout time.Duration
 }
 
@@ -47,14 +51,29 @@ type Engine struct {
 	httpAddr   string
 	socksAddr  string
 	running    bool
-	lastErr    string
+
+	// udpPc is the single relay socket every UDP ASSOCIATE client shares; udpAddr
+	// is the address clients are told to send to. udpMu guards udpSessions, which
+	// is kept separate from mu so datagram forwarding never contends with the
+	// configuration lock.
+	udpPc       net.PacketConn
+	udpAddr     string
+	udpMu       sync.Mutex
+	udpSessions map[string]*udpSession
+	udpUp       bool
+	// udpMax is the session cap; a field rather than the constant so tests can
+	// exercise the refusal path without opening hundreds of sockets.
+	udpMax int
+
+	// done is closed by Stop to release goroutines that are waiting rather than
+	// blocked on a socket (the accept backoff, the UDP relay's idle sweep).
+	// It is created by Start, so a Stop/Start cycle gets a fresh one.
+	done chan struct{}
 
 	up       atomic.Int64
 	down     atomic.Int64
 	active   atomic.Int64
 	sessions atomic.Int64
-
-	conns *connTable
 
 	connMu sync.Mutex
 	open   map[net.Conn]struct{}
@@ -65,8 +84,8 @@ func NewEngine(log Logger) *Engine {
 	return &Engine{
 		log:         log,
 		dialTimeout: 15 * time.Second,
-		conns:       newConnTable(200),
 		open:        make(map[net.Conn]struct{}),
+		udpMax:      udpDefaultMaxSessions,
 	}
 }
 
@@ -106,6 +125,20 @@ func (e *Engine) Start(cfg Config) error {
 			return fmt.Errorf("无法监听 HTTP 端口 %s: %v", cfg.HTTPAddr, err)
 		}
 	}
+	// UDP is bound on its own AF_INET socket, so binding the same host:port as
+	// the SOCKS listener is not a conflict; a failure here means something else
+	// already owns the UDP port.
+	var udpPc net.PacketConn
+	if cfg.UDPAddr != "" {
+		udpPc, err = net.ListenPacket("udp", cfg.UDPAddr)
+		if err != nil {
+			if httpLn != nil {
+				_ = httpLn.Close()
+			}
+			_ = socksLn.Close()
+			return fmt.Errorf("无法监听 UDP 端口 %s: %v", cfg.UDPAddr, err)
+		}
+	}
 
 	e.cipher = ciph
 	e.serverAddr = net.JoinHostPort(cfg.Server.Host, fmt.Sprint(cfg.Server.Port))
@@ -119,15 +152,30 @@ func (e *Engine) Start(cfg Config) error {
 	} else {
 		e.httpAddr = ""
 	}
-	e.running = true
-	e.lastErr = ""
-
-	go e.acceptLoop(socksLn, e.handleSOCKS)
-	if httpLn != nil {
-		go e.acceptLoop(httpLn, e.handleHTTP)
+	e.udpPc = udpPc
+	if udpPc != nil {
+		e.udpAddr = udpPc.LocalAddr().String()
+	} else {
+		e.udpAddr = ""
 	}
-	e.logf("info", "proxy", "已启动：SOCKS5 %s，HTTP %s，出口 %s（%s）",
-		e.socksAddr, orNone(e.httpAddr), e.serverAddr, cfg.Server.Method)
+	e.udpMu.Lock()
+	e.udpSessions = make(map[string]*udpSession)
+	e.udpUp = udpPc != nil
+	e.udpMu.Unlock()
+
+	e.running = true
+	e.done = make(chan struct{})
+	done := e.done
+
+	go e.acceptLoop(socksLn, e.handleSOCKS, done)
+	if httpLn != nil {
+		go e.acceptLoop(httpLn, e.handleHTTP, done)
+	}
+	if udpPc != nil {
+		go e.udpLoop(done)
+	}
+	e.logf("info", "proxy", "已启动：SOCKS5 %s，HTTP %s，UDP %s，出口 %s（%s）",
+		e.socksAddr, orNone(e.httpAddr), orNone(e.udpAddr), e.serverAddr, cfg.Server.Method)
 	return nil
 }
 
@@ -136,16 +184,32 @@ func (e *Engine) Stop() {
 	e.mu.Lock()
 	socksLn, httpLn := e.socksLn, e.httpLn
 	e.socksLn, e.httpLn = nil, nil
+	udpPc := e.udpPc
+	e.udpPc = nil
+	e.udpAddr = ""
 	wasRunning := e.running
 	e.running = false
+	done := e.done
+	e.done = nil
 	e.mu.Unlock()
 
+	// Release goroutines that are sleeping in a backoff before closing the
+	// listeners, so they do not have to wait out their timer.
+	if done != nil {
+		close(done)
+	}
 	if socksLn != nil {
 		_ = socksLn.Close()
 	}
 	if httpLn != nil {
 		_ = httpLn.Close()
 	}
+	// Closing the relay socket unblocks udpLoop; closing the sessions unblocks
+	// their reply loops, which also drop themselves from the session map.
+	if udpPc != nil {
+		_ = udpPc.Close()
+	}
+	e.closeUDPSessions(true)
 	e.closeOpen()
 	if wasRunning {
 		e.logf("info", "proxy", "已停止本地代理")
@@ -163,6 +227,10 @@ func (e *Engine) SetServer(p config.ServerProfile) error {
 	e.cipher = ciph
 	e.serverAddr = net.JoinHostPort(p.Host, fmt.Sprint(p.Port))
 	e.mu.Unlock()
+	// UDP sessions hold a resolved copy of the old server address, so they have
+	// to go; the next datagram rebuilds them against the new one. TCP tunnels
+	// already established keep their old destination, as before.
+	e.closeUDPSessions(false)
 	e.logf("info", "proxy", "已切换出口服务器：%s（%s）", e.serverAddr, p.Method)
 	return nil
 }
@@ -181,11 +249,11 @@ func (e *Engine) Addresses() (socks string, http string) {
 	return e.socksAddr, e.httpAddr
 }
 
-// LastError returns the most recent listener level error.
-func (e *Engine) LastError() string {
+// UDPAddr returns the resolved UDP relay address, or "" when UDP is off.
+func (e *Engine) UDPAddr() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.lastErr
+	return e.udpAddr
 }
 
 // Stats returns the cumulative counters.
@@ -198,32 +266,45 @@ func (e *Engine) Stats() Stats {
 	}
 }
 
-// ResetStats clears the traffic counters.
-func (e *Engine) ResetStats() {
-	e.up.Store(0)
-	e.down.Store(0)
-	e.sessions.Store(0)
-}
-
-// Connections returns the most recent connections, newest first.
-func (e *Engine) Connections(max int) []ConnInfo {
-	return e.conns.snapshot(max)
-}
-
-// ClearConnections drops the connection history.
-func (e *Engine) ClearConnections() { e.conns.clear() }
-
 // acceptLoop accepts connections until the listener is closed.
-func (e *Engine) acceptLoop(ln net.Listener, handle func(net.Conn)) {
+//
+// A persistent Accept error (EMFILE/ENFILE when the process is out of file
+// descriptors, or a transient kernel failure) would otherwise spin this loop at
+// full speed and write a log line per iteration. Consecutive failures therefore
+// back off and are logged on a decreasing cadence instead of every time; the
+// loop still recovers immediately once a connection arrives.
+func (e *Engine) acceptLoop(ln net.Listener, handle func(net.Conn), done <-chan struct{}) {
+	const (
+		minBackoff = 5 * time.Millisecond
+		maxBackoff = time.Second
+	)
+	backoff := time.Duration(0)
+	failures := 0
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			if isClosedErr(err) {
 				return
 			}
-			e.logf("warn", "proxy", "accept 失败: %v", err)
+			failures++
+			if backoff == 0 {
+				backoff = minBackoff
+			} else if backoff *= 2; backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			// Log the first failure and then roughly once per second, so a long
+			// outage stays visible without flooding the log file.
+			if failures == 1 || backoff == maxBackoff {
+				e.logf("warn", "proxy", "accept 失败（连续 %d 次）: %v", failures, err)
+			}
+			select {
+			case <-time.After(backoff):
+			case <-done:
+				return
+			}
 			continue
 		}
+		backoff, failures = 0, 0
 		if tc, ok := c.(*net.TCPConn); ok {
 			_ = tc.SetKeepAlive(true)
 			_ = tc.SetKeepAlivePeriod(30 * time.Second)
@@ -266,11 +347,11 @@ func (e *Engine) closeOpen() {
 func (e *Engine) handleSOCKS(client net.Conn) {
 	req, err := readSocksRequest(client)
 	if err != nil {
-		if !errors.Is(err, errSocksUDPUnsupported) {
-			e.logf("debug", "socks", "握手失败 %s: %v", client.RemoteAddr(), err)
-		} else {
-			e.logf("info", "socks", "客户端请求 UDP ASSOCIATE，本版本暂不支持")
-		}
+		e.logf("debug", "socks", "握手失败 %s: %v", client.RemoteAddr(), err)
+		return
+	}
+	if req.Cmd == cmdUDPAssoc {
+		e.serveUDPAssociate(client)
 		return
 	}
 	e.serveTunnel(client, req.Target, func(rep byte) {
@@ -284,7 +365,6 @@ func (e *Engine) handleSOCKS(client net.Conn) {
 // serveTunnel dials the upstream and relays until either side finishes.
 // reply is called exactly once, before any payload is exchanged.
 func (e *Engine) serveTunnel(client net.Conn, target string, reply func(rep byte), scope string) {
-	id, _ := e.conns.begin(target)
 	cnt := &counters{globUp: &e.up, globDown: &e.down}
 
 	tunnel, err := e.tunnel(target)
@@ -292,8 +372,6 @@ func (e *Engine) serveTunnel(client net.Conn, target string, reply func(rep byte
 		reply(replyForError(err))
 	}
 	if err != nil {
-		e.active.Add(0)
-		e.conns.end(id, 0, 0, err.Error())
 		e.logf("warn", scope, "%s -> %s 失败: %v", client.RemoteAddr(), target, err)
 		return
 	}
@@ -305,7 +383,6 @@ func (e *Engine) serveTunnel(client net.Conn, target string, reply func(rep byte
 	relay(client, tunnel, cnt)
 
 	e.active.Add(-1)
-	e.conns.end(id, cnt.connUp.Load(), cnt.connDown.Load(), "")
 	e.logf("debug", scope, "结束 %s，↑%s ↓%s", target, humanBytes(cnt.connUp.Load()), humanBytes(cnt.connDown.Load()))
 }
 

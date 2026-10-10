@@ -1,35 +1,23 @@
 # Build Directory
 
-The build directory is used to house all the build files and assets for your application. 
+Wails 的构建资产目录。本项目只针对 macOS（Apple Silicon）。
 
-The structure is:
+目录结构：
 
-* bin - Output directory
-* darwin - macOS specific files
-* windows - Windows specific files
+* `bin` — 构建输出（`SSXNG.app`），由 `make build` / `wails build` 生成，已被 `.gitignore` 忽略。
+* `darwin` — macOS 专用 plist。
+* `appicon.png` — 应用图标源文件。
 
-## Mac
+## macOS
 
-The `darwin` directory holds files specific to Mac builds.
-These may be customised and used as part of the build. To return these files to the default state, simply delete them
-and
-build with `wails build`.
+`darwin` 目录存放 macOS 构建用的 plist，可按需修改；删除后再次 `wails build`
+会回到 Wails 的默认模板。包含：
 
-The directory contains the following files:
+- `Info.plist` — `wails build`（正式构建）使用的主 plist。
+- `Info.dev.plist` — `wails dev` 使用的 plist。
 
-- `Info.plist` - the main plist file used for Mac builds. It is used when building using `wails build`.
-- `Info.dev.plist` - same as the main plist file but used when building using `wails dev`.
+## 说明
 
-## Windows
-
-The `windows` directory contains the manifest and rc files used when building with `wails build`.
-These may be customised for your application. To return these files to the default state, simply delete them and
-build with `wails build`.
-
-- `icon.ico` - The icon used for the application. This is used when building using `wails build`. If you wish to
-  use a different icon, simply replace this file with your own. If it is missing, a new `icon.ico` file
-  will be created using the `appicon.png` file in the build directory.
-- `installer/*` - The files used to create the Windows installer. These are used when building using `wails build`.
-- `info.json` - Application details used for Windows builds. The data here will be used by the Windows installer,
-  as well as the application itself (right click the exe -> properties -> details)
-- `wails.exe.manifest` - The main application manifest file.
+本项目没有 `build/windows/` 目录，也不产出 Windows 安装包，因此不再保留
+Wails 模板里关于 `icon.ico` / `installer/*` / `info.json` / `wails.exe.manifest`
+的说明。

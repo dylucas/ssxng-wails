@@ -63,17 +63,6 @@ type Traffic struct {
 	Sessions  int64 `json:"sessions"`
 }
 
-// ConnView is one (recent or active) proxied connection.
-type ConnView struct {
-	ID      int64  `json:"id"`
-	Target  string `json:"target"`
-	Started int64  `json:"started"`
-	Up      int64  `json:"up"`
-	Down    int64  `json:"down"`
-	Active  bool   `json:"active"`
-	Error   string `json:"error"`
-}
-
 // NetworkService is one macOS network service as reported by the helper.
 type NetworkService struct {
 	Name         string `json:"name"`
@@ -112,6 +101,7 @@ type State struct {
 	Modes     []string     `json:"modes"`
 	Socks     ListenerView `json:"socks"`
 	HTTP      ListenerView `json:"http"`
+	UDP       ListenerView `json:"udp"`
 	PAC       PACView      `json:"pac"`
 	Server    *ServerView  `json:"server"`
 	Servers   []ServerView `json:"servers"`
@@ -131,6 +121,7 @@ type SettingsView struct {
 	HTTPAddress       string   `json:"httpAddress"`
 	HTTPPort          int      `json:"httpPort"`
 	HTTPFollowGlobal  bool     `json:"httpFollowGlobal"`
+	UDPEnabled        bool     `json:"udpEnabled"`
 	PACAddress        string   `json:"pacAddress"`
 	PACPort           int      `json:"pacPort"`
 	PACBindLocalhost  bool     `json:"pacBindLocalhost"`

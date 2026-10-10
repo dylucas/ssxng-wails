@@ -1,16 +1,45 @@
-# Wails bin directory
-build/bin
-# Wails Windows NSIS support files
+# ============ 构建产物 ============
+# Wails 的可执行文件输出目录
+build/bin/
+
+# Wails 生成的 Windows 安装器支持文件
 build/windows/installer/wails_tools.nsh
 build/windows/installer/tmp/
 
-# Local build cache (GOCACHE) and generated helper
-.cache/
+# UI 自检截图：由 scripts/ui-check.sh（scripts/ui-check/measure.js）生成，
+# 默认输出到 /tmp/ssxng-ui-shots；这里把误提交进版本库的那份挡在外面。
+build/ui-check/
+
+# 内置的特权助手：由 make helper / scripts/build.sh 生成后再嵌入 app
 internal/helperbin/bin/ssxng-helper
 
-# IDEs
-.idea
-.vscode
+# ============ 本地缓存 ============
+# 沙箱 / CI 常用 GOCACHE=$(pwd)/.gocache 把 Go 构建缓存放进工作区。
+# 早先只写了 .cache/，于是 .gocache/ 被误提交：上千个文件、60 MiB 的 pack，
+# 在 git status 里制造上万条噪声，把真正的改动埋掉。
+.cache/
+.gocache/
+.gotmp/
+coverage.out
+*.test
 
-# The black hole that is...
-node_modules
+# ============ 依赖 ============
+node_modules/
+
+# ============ 编辑器 / IDE ============
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ============ macOS ============
+.DS_Store
+._*
+
+# ============ 杂项 ============
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej

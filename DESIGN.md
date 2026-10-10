@@ -9,17 +9,25 @@
 （SOCKS5 + HTTP 本地代理、PAC 自动分流、系统代理自动配置、菜单栏常驻），代码可读、可测试、
 依赖尽量少。
 
-**非目标**：成为 ss-local 的全能替代（不做 UDP、插件、订阅、SS2022），也不做跨平台适配。
+**非目标**：成为 ss-local 的全能替代（不做插件、订阅、SS2022），也不做跨平台适配。
 
 ## 分层
 
 ```
 main.go                 Wails 启动参数、资源嵌入、单实例准备
-app.go                  应用状态机：绑定的前端方法、事件推送、日志、流量轮询、看门狗
+app.go                  应用状态机：生命周期、绑定的前端方法、状态快照、后台循环
+app_proxy.go            代理开关与模式切换
+app_settings.go         设置的视图转换、保存/应用、登录项与 Dock 图标、网络服务枚举
+app_servers.go          节点增删改查、排序、ss:// 导入导出、连通性测试
+app_pac.go              PAC 生成、PAC 服务器、gfwlist 下载、规则文件入口
+app_diag.go             助手状态、自检、诊断报告
+app_log.go              日志读取与日志文件
+app_tray.go             菜单栏集成
+app_util.go             字符串/Finder/下载/原子写等小工具
 apply.go                系统代理期望状态计算与 reconcile（调用助手、校验、记录）
-frontend/src/           界面（index.html / app.js / i18n.js / main.css），无构建步骤
+frontend/src/           界面（index.html / i18n.js / main.css + 4 个 app 脚本），无构建步骤
 cmd/ssxng-helper/       setuid 助手入口（argv 白名单）
-internal/sscore/        SOCKS5 + HTTP 代理 + AEAD 隧道 + 统计（核心）
+internal/sscore/        SOCKS5 + HTTP 代理 + AEAD 隧道 + UDP 中继 + 统计（核心）
 internal/ssurl/         ss:// 解析与生成（SIP002）
 internal/pac/           gfwlist 解码、规则合并、PAC 生成、PAC HTTP 服务器、abp.js
 internal/config/        设置与服务器配置的存取（JSON，原子写）
@@ -33,7 +41,17 @@ internal/helperbin/     嵌入的助手二进制
 internal/api/           前后端 DTO（唯一契约）
 ```
 
-依赖方向是单向的：`app.go` → `internal/*` → 标准库与 `go-shadowsocks2`。
+`package main` 拆成多个 `app*.go` 是按领域切的纯搬移，彼此没有导入关系（本来就是同一个包），
+拆分的依据是"改哪一类需求就动哪个文件"。
+
+前端同理：`app.js` 拆成四个脚本，**加载顺序即依赖顺序**
+（`i18n.js` → `app-core.js` → `app-views.js` → `app-actions.js` → `app.js`）。
+每个脚本各自一个 IIFE，靠 `window.SSXNG` 互相引用；只有最后那个 `app.js` 会产生副作用
+（绑定事件、首次拉取状态）。一个文件只允许解构"在它之前加载"的文件导出的名字，
+要引用后面文件里的东西一律写 `S.name(...)`，这样加载顺序就不会变成隐式契约。
+`scripts/ui-check/measure.js` 会静态校验这两条规则。
+
+依赖方向是单向的：`app*.go` → `internal/*` → 标准库与 `go-shadowsocks2`。
 `internal/sscore`、`internal/pac`、`internal/ssurl`、`internal/proxyconf` 都不依赖 Wails，
 可以单独测试，也方便将来接到别的外壳上。
 
@@ -177,11 +195,12 @@ SSX-NG 通过 privoxy 做 HTTP→SOCKS 转换，多一个进程、一份配置�
 二是推导身份标记时不能依赖"当前状态"，因为清理动作本身就会先把状态改掉。
 
 **自检的桩必须与真实 DTO 同形**
-`scripts/ui-check/stub.js` 里 `Diagnose` 一直写成 `{checks: [...]}`，而 `app.go` 真实返回的是
+`scripts/ui-check/stub.js` 里 `Diagnose` 一直写成 `{checks: [...]}`，而 `app*.go` 真实返回的是
 `[]api.Check`。前端 `arr(r.value)` 对错误形状是容错的（拿到空数组、显示"未运行"），于是
 **诊断结果表从未在自检里渲染过一次**——它的横向溢出与文字对比度都没有被覆盖，而自检一直是全绿。
 修好形状后表格才真的出现，也才被纳入检查。教训是：容错解析会把桩的错误静默吞掉，
-所以桩的形状要单独对照 `internal/api/types.go` 和 `app.go` 的返回类型核一遍。
+所以桩的形状要单独对照 `internal/api/types.go` 和 `app*.go` 的返回类型核一遍——
+这件事现在由 `scripts/ui-check/measure.js` 的 `staticAPIShapeCheck` 自动做。
 
 **界面：颜色只走变量，并有对比度自检**
 所有颜色都在 `:root`（深色）与 `prefers-color-scheme: light` 覆盖里定义为变量。
@@ -190,6 +209,78 @@ SSX-NG 通过 privoxy 做 HTTP→SOCKS 转换，多一个进程、一份配置�
 只有 3.3–3.6:1、白字压强调色只有 2.9:1，因此 `--text-3` 提亮/加深，并拆出
 `--accent-text`（强调色文字）与 `--accent-strong`（承载白字的按钮底色），
 `--accent` 继续用于图标/边框这类非文字场景。
+
+**命令行代理：复制"当前生效"的 export 命令**
+SSX-NG 的菜单里有 "Copy HTTP Proxy Shell Export Command"，这里把它做成两处入口：
+「模式与代理」页的"命令行代理"块（HTTP 与 SOCKS5 各一行等宽的
+`export http_proxy=…;export https_proxy=…;`，右侧一个复制按钮），以及菜单栏里的
+"复制 HTTP 代理命令"/"复制 SOCKS5 代理命令"两项。菜单栏这两项与窗口同屏可见的命令是
+**同一串文字**，都从已保存的监听设置生成，所以"菜单里复制的"和"窗口里显示"不会分叉。
+
+窗口侧的两个刻意取舍：命令文本从**已保存的 settings** 生成，而不是编辑中的草稿——端口改了但
+没保存时监听端口并没有变，命令也就不该跟着变（此时用一行提示说明"保存并应用后命令才会更新"）；
+点击复制时按 `data-id` 重新生成命令，而不是读 DOM 里的文字，避免界面文本（截断、省略号、
+本地化）污染剪贴板。HTTP 关闭时只保留 SOCKS5 并说明如何启用；代理未开启时照常给出命令，
+只加一行"需要先开启代理才有效"。
+
+菜单栏侧的取舍：命令由 Go（`App.trayProxyCommands`）生成后随 `tray.Snapshot` 一起下发，
+AppKit 把每项要复制的文字挂在 `representedObject` 上，**点击时由 Cocoa 直接写
+`NSPasteboard`**，不绕前端——这样窗口隐藏、甚至 webview 还没起来时也能复制，
+`ssxngTrayEvent(5, …)` 只是回来让 Go 记日志并弹一个"已复制到剪贴板"。
+剪贴板在窗口侧首选 Wails 的 `ClipboardSetText`（`wails://` 不是安全上下文，
+`navigator.clipboard` 常常不存在，而 `execCommand` 依赖用户手势、且已被标记废弃，
+所以另外两条只作回退）。
+
+这条链路横跨 Go、cgo 和界面三层，坏起来又都是静默的，所以三处各自钉住同一串字面量：
+`tray_test.go` 断言 Go 生成的命令、`scripts/ui-check/measure.js` 断言窗口显示与复制的内容、
+`scripts/tray-check.sh` 把真实的 `tray_darwin.m` 编译成无界面小程序，断言菜单项标题、
+`representedObject`（即写进剪贴板的文字）与 `copyCommand:` 动作都对。
+菜单项的解析规则是 `key|title|command`，第二个分隔符之后的全部内容都算命令，
+所以命令里出现 `|` 也不会被截断（`EncodeMenuSpecs` 另有单元测试）。
+
+**菜单栏图标：一眼看出代理开没开**
+图标是代码画的纸飞机，18×18，设成 template——macOS 只按 alpha 通道渲染 template 图，
+所以它在浅色栏上是黑的、深色栏上是白的，高亮时自动反色。这带来一个约束：**开关状态不能靠
+颜色表达**（颜色会被系统吃掉），只能靠形状。于是开启时画**实心**剪影，关闭时画**同一轮廓的
+空心**（描边不填充），"空 = 关"在两种菜单栏外观下都成立。
+
+实现上 `ssxngIconForEnabled(BOOL)` 缓存两张图（`Refresh` 每次状态变化都会跑，不该每跑一次
+就重画一遍），`ssxngTrayRefresh` 每次按 `enabled` 调 `setImage:`；`SetEnabled` 两条分支末尾
+都会 `emitState()`，而它必然调 `tray.Refresh()`，所以从窗口开关、菜单栏开关还是看门狗
+恢复，图标都会立刻跟上。测试不去读像素"看起来对不对"，而是问一个能判定对错的问题：
+**飞机重心**（顶点均值，射线法确认落在多边形内）在实心图里必须不透明、在空心图里必须透明，
+而轮廓中点两种图都必须有笔画（空心不等于空白）；另断言两张图尺寸、template 标志与缓存命中。
+`SSXNG_TRAY_ICON_OUT=<dir> scripts/tray-check.sh` 会把两张图和一张深浅底色的 6× 预览导出来，
+人工确认观感——像素断言管不了"好不好看"。
+
+**UDP 转发：共用一个端口，按客户端地址分会话**
+RFC 1928 的 `UDP ASSOCIATE` 里客户端先建一条 TCP 连接、拿到中继地址，之后把数据报
+（`RSV(2) FRAG(1) ATYP DST.ADDR DST.PORT DATA`）发给那个地址；回应同样是这个格式，
+只是地址换成来源。出站时把前三个字节去掉、把地址头留在加密载荷里，Shadowsocks 服务端
+按地址头自己分流；入站时反过来补上 `RSV/FRAG=0`。所以"一个客户端一条加密 socket"就够，
+不需要按目标建连。
+
+几个必须做对、做错了会静默失效的地方：
+
+- **应答里的 `BND.ADDR/BND.PORT` 必须是真的**。CONNECT 的应答历来填 `0.0.0.0:0`，因为客户端
+  从不读它；UDP 的应答就是客户端唯一的收件地址，填空等于让所有 UDP 应用无声无息地失败。
+  `replyBytesAddr` 因此单独存在，`TestUDPAssociateRewritesTheBoundAddress` 钉住它。
+- **UDP 与 SOCKS 共用一个端口**。TCP 与 UDP 是两套命名空间，所以 `127.0.0.1:1086` 上同时
+  监听 TCP 和 UDP 不冲突；这也意味着用户不需要在应用里再配一个端口。绑定是事务性的：
+  UDP 绑不上时 TCP 监听也一起回滚。
+- **会话按客户端地址索引，靠空闲回收**。整个中继只有一个 UDP socket，所有客户端共用它；
+  会话不是随 TCP 控制连接结束而销毁的，因为一个客户端可能开多条关联、也可能提前断开而
+  继续发数据报（`TestUDPAssociateKeepsControlConnectionOpen` 钉住了控制连接不会被主动关）。
+  所以 60 秒无活动就回收，另有 256 条的上限防止会话表把文件描述符耗光。
+- **过大的数据报显式丢弃**。`shadowaead` 的 `PacketConn` 用固定 64 KiB 缓冲区，
+  超过 `64KiB - salt - tag` 的载荷会被它**静默截断**（`Pack` 只返回 `io.ErrShortBuffer`，
+  而写入方只看得到写成功）。中继因此先算容量再转发，宁可丢掉也不发一个半截包。
+- **FRAG≠0 直接丢**。分片在 SOCKS5 里是可选的，主流客户端不发；要支持就得在这里重组。
+
+设置里 `udpEnabled` 默认开启。它在 `Settings` 里是普通 `bool` 且默认值为真——`config.Open`
+是把文件 `Unmarshal` 到 `DefaultSettings()` 之上，所以**旧配置文件里没有这个键时仍然是开启**，
+不会因为升级而被静默关掉（`TestUDPSettingDefaultsToOnForExistingConfigs` 钉住）。切换它
+必须重启引擎，因此它和监听地址一样参与 `needRestart` 判定。
 
 ## 与 ShadowsocksX-NG 的差异
 
@@ -202,9 +293,10 @@ SSX-NG 通过 privoxy 做 HTTP→SOCKS 转换，多一个进程、一份配置�
 | 自动模式 bypass | 写入 `ProxyExceptions` | **不改动** | 避免破坏用户自有列表（如 `*.cn`） |
 | 全局模式 bypass | 写入 `ProxyExceptions` | 写入例外列表，关闭时按快照恢复 | 与 SSX-NG 一致，但可恢复 |
 | HTTP 代理 | privoxy 子进程 | Go 内实现 | 少一个进程/依赖 |
+| 命令行代理命令 | 菜单栏 "Copy HTTP Proxy Shell Export Command" | 菜单栏两项 + 「模式与代理」页两条命令，都能一键复制 | 与监听设置同屏，也能在窗口收起时直接用 |
 | 开机自启 | SMLoginItem 辅助 App | LaunchAgent（`org.ssxng.SSXNG.plist`） | 无需额外 bundle |
 | 加密方式 | 含流式加密、xchacha20 | 仅 4 种 AEAD | 安全性；避免选了连不上 |
-| UDP | 支持 | 不支持 | 范围外，明确不做 |
+| UDP | 支持 | 支持（SOCKS5 `UDP ASSOCIATE`，与 SOCKS 共用端口，默认开启） | 用 TUN 或额外端口都会与"只监听回环"冲突 |
 | SS2022 / SIP003 插件 / 订阅 / 二维码 | 部分支持 | 不支持 | 范围外，明确不做 |
 | 帮助/诊断 | 无 | 诊断页 + 端到端自检 | 降低排障成本 |
 | 助手参数 | `-m/-u/-p/-l/-r/-s/-n/-x/-v` | `--mode/--pac-url/--port/--socks-listen-address/--http-port/--http-listen-address/--network-service/--proxy-exception/--state-path/--dry-run` | 长参数更明确 |
@@ -230,7 +322,9 @@ SOCKS host:port 匹配且当前为开启状态"才清理。
 
 - `internal/sscore`：EVP_BytesToKey 已知向量；四种加密方式经 SOCKS5 端到端；HTTP 绝对形式转发；
   HTTPS `CONNECT` 隧道；1 MiB 大流量完整性；8 并发连接；服务器不可达时的 SOCKS 错误码；
-  目标拒绝连接的行为；UDP ASSOCIATE 拒绝；停止后端口释放；热切换服务器。
+  目标拒绝连接的行为；UDP ASSOCIATE 的完整往返（含应答里的 BND.ADDR/PORT、多目标复用同一会话、
+  按客户端地址分会话、FRAG≠0 与畸形报文丢弃、会话上限、空闲回收、停止后 UDP 端口释放、
+  服务器热切换重建会话）；UDP 关闭时按协议拒绝；停止后端口释放；热切换服务器。
 - `internal/pac`：base64 容忍、行切分、用户规则合并与去重、空/注释行过滤、PAC 生成与占位符替换、
   URL 校验、PAC 服务器响应头与缓存、规则计数与缓存击穿 URL 解析。
 - `internal/proxyconf`：`networksetup` 输出解析（含 `** Error:` 走 stdout 但退出码 0 的情况）、
@@ -250,12 +344,21 @@ SOCKS host:port 匹配且当前为开启状态"才清理。
 `main.css` 无硬编码颜色且 `var()` 引用都有定义。它只做"可断言的硬指标"，观感仍要人眼确认，
 所以迭代用 `make dev` 热加载。
 
+菜单栏那层原生代码用 `scripts/tray-check.sh`：把真实的 `tray_darwin.m` 连同它依赖的
+Cocoa 框架编译成一个无界面小程序（`gTarget` 手工建好，不碰 `NSStatusBar`），断言
+"命令行代理"菜单项的条数、标题、`representedObject`（就是点击后会写进剪贴板的文字）、
+`copyCommand:` 动作与目标对象，以及空 spec / 坏行 / 命令含 `|` 的边界。
+Go 与 Objective-C 之间的格式（`EncodeMenuSpecs` 的 `key|title|command`）由
+`internal/tray/tray_test.go` 单独钉住，所以这条链路的每一层都有断言——
+它的失效方式是静默的（标题空、复制出错位的文字），而 ui-check 看不见原生菜单。
+
 手工验证过（本机、沙箱内可做的部分）：
 
 - `wails build` 产出 `build/bin/SSXNG.app`（arm64，12.9 MB，助手二进制已嵌入），ad-hoc 签名校验通过。
 - App 启动后写出 `config.json` / `servers.json` / `ssxng.lock` / `ssxng.log`，单实例锁生效，
   进程稳定不崩（菜单栏图标创建成功，无警告）。
-- `wails dev` 资产服务器：`/`、`/index.html`、`/app.js`、`/i18n.js`、`/main.css` 均 200 且
+- `wails dev` 资产服务器：`/`、`/index.html`、`/i18n.js`、`/main.css` 与四个 app 脚本
+  （`/app-core.js`、`/app-views.js`、`/app-actions.js`、`/app.js`）均 200 且
   Content-Type 正确，已删除的 `/main.js` 返回 404。
 - 助手：`--version`、`--list-services`（真实读回 Wi-Fi/Thunderbolt Bridge 的代理与 bypass 列表）、
   三种模式的 `--dry-run` 命令计划（全局模式启用 127.0.0.1:1087 的 HTTP/HTTPS 与 1086 的 SOCKS
@@ -269,7 +372,7 @@ SOCKS host:port 匹配且当前为开启状态"才清理。
 
 ## 后续可做
 
-- UDP 转发（`UDP ASSOCIATE`）与 DNS 处理。
+- DNS over TCP/DoH 的默认策略（目前 DNS 是否走代理取决于应用是否用 UDP，浏览器自带 DoH 时可能绕过）。
 - SS2022（SIP022）与 SIP003 插件进程管理。
 - 订阅链接导入与规则分流（acl/geo 文件）。
 - 用 `notarize`/Developer ID 正式签名，替掉 ad-hoc 签名。

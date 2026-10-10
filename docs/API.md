@@ -31,8 +31,6 @@ window.runtime.EventsOn('ssxng:toast',   (toast)  => { /* {level, message} */ })
 | `GetState()` | – | `State` |
 | `SetEnabled(on)` | bool | – |
 | `SetMode(mode)` | `'auto'\|'global'\|'manual'\|'externalPAC'\|'off'` | – |
-| `CycleMode()` | – | `string`（下一个模式，供菜单栏/快捷键使用） |
-| `ListServers()` | – | `ServerView[]` |
 | `AddServer(view)` | `ServerView` | `ServerView`（含生成的 `id`） |
 | `UpdateServer(view)` | `ServerView` | – |
 | `DeleteServer(id)` | string | – |
@@ -57,8 +55,7 @@ window.runtime.EventsOn('ssxng:toast',   (toast)  => { /* {level, message} */ })
 | `SetLaunchAtLogin(on)` | bool | – |
 | `SetHideDockIcon(on, ask)` | bool, bool | – |
 | `Quit()` | – | – （真正退出，会按设置清理系统代理） |
-| `HideWindow()` | – | – |
-| `Version()` | – | string |
+| `ShowWindow()` | – | – （托盘“显示主窗口”用；窗口隐藏时恢复并取消最小化） |
 
 **重要**：`ServerView.password` 会回传给前端（用户要能编辑），但前端**绝不能**把它写进日志或 DOM 的 data 属性。
 
@@ -68,6 +65,7 @@ window.runtime.EventsOn('ssxng:toast',   (toast)  => { /* {level, message} */ })
 State = {
   version: string, enabled: boolean, mode: string, modes: string[],
   socks: { address, port, active }, http: { address, port, active },
+  udp:   { address, port, active },   // 与 socks 同端口；udpEnabled=false 时 active 恒为 false
   pac:   { address, port, active, url, ruleCount, generatedAt, externalURL, source, lastError },
   server: ServerView | null,
   servers: ServerView[],
@@ -86,7 +84,7 @@ Check      = { name, status, detail, suggestion }                  // status: ok
 SelfTestReport = { ok, steps: {name, ok, detail}[], elapsedMs }
 SettingsView = {
   socksAddress, socksPort,
-  httpEnabled, httpAddress, httpPort, httpFollowGlobal,
+  httpEnabled, httpAddress, httpPort, httpFollowGlobal, udpEnabled,
   pacAddress, pacPort, pacBindLocalhost, gfwlistURL, externalPACURL,
   exceptions, autoConfigureNetworkServices, networkServices: string[],
   enablePAC, enableGlobal, enableManual, enableExternalPAC,
@@ -98,9 +96,10 @@ SettingsView = {
 
 1. **状态**：总开关（大按钮，`SetEnabled`）、模式单选（5 个；`modes` 里的才算"启用"）、当前服务器、
    实时流量（`up/down` 人类可读 + `upSpeed/downSpeed`）、活动连接数/累计会话、
-   本地端口一览（SOCKS/HTTP/PAC，带 `active` 指示）、最近连接列表（`GetState().servers` 之后的
-   `ConnView` 由 `ssxng:state` 里 `traffic` 反映，最近连接请调用 `Diagnose()` 之外的方式：
-   暂用日志区展示 `ssxng:log` 里的 `proxy` 记录）、助手状态卡片（未安装时给"安装助手"按钮）。
+   本地端口一览（SOCKS/HTTP/PAC，带 `active` 指示；UDP 与 SOCKS 共端口，所以在 SOCKS
+   那一项后面追加一个 `UDP` 标记而不是单独占一项——状态页"关键事实"一行固定 4 项，
+   多一项就会换行）、助手状态卡片（未安装时给"安装助手"按钮）。
+   最近连接明细暂无独立视图：连接历史只用于日志区展示 `ssxng:log` 里的 `proxy` 记录。
 2. **服务器**：列表（标题、host:port、method、当前选中打勾），支持新增/编辑/删除/上移下移/选中；
    编辑表单字段：备注、地址、端口、加密方式（下拉，来自 `SupportedMethods`，见 Go
    `internal/config/servers.go`：aes-128-gcm / aes-192-gcm / aes-256-gcm /
@@ -109,7 +108,11 @@ SettingsView = {
    `hasPlugin` 为真时在列表里显示黄色标记"插件（不支持，已忽略）"。
 3. **模式与代理**：`SettingsView` 表单 + `ApplySettings`；网络服务勾选列表（`ListNetworkServices`，
    `autoConfigureNetworkServices` 为真时禁用勾选并提示"自动选择 Wi-Fi/Ethernet"）；
-   例外列表文本框；退出时清理系统代理、唤醒后自动恢复两个开关。
+   例外列表文本框；退出时清理系统代理、唤醒后自动恢复两个开关；
+   "启用 UDP 转发"复选框（`udpEnabled`，与"HTTP 跟随全局模式"同格竖排——监听网格每多一格
+   就多一整行，页高有硬门槛）；
+   命令行代理块：按已保存的监听设置生成 HTTP / SOCKS5 两条 `export http_proxy=…;export https_proxy=…;`，
+   每条一个"复制命令"按钮（复制内容按 `data-id` 重新生成，不读 DOM 文本）。
 4. **PAC**：显示 PAC URL、规则数、生成时间、数据源；"从 GFWList 更新"按钮（`UpdatePACFromGFWList`，
    期间禁用按钮并显示加载态）；"编辑用户规则"→ `OpenUserRuleFile()`；外部 PAC URL 输入框；
    GFWList URL 输入框 + "恢复默认/使用镜像"按钮（镜像地址见 Go `config.DefaultGFWListMirror`）。
@@ -127,16 +130,31 @@ SettingsView = {
 - 长任务（安装助手、更新 PAC、自检、测试连接）必须有禁用态 + loading 文案，不能重复点击。
 - 危险操作（删除服务器）要 `confirm`。
 - 端口/密码等输入必须有前端校验提示（端口 1024-65535、回环地址限制），但仍以 Go 端校验为准。
-- 单文件 `app.js`（ES2020，`<script defer src="/app.js">`），不要用模块化 import（asset server 下
-  相对路径 import 会 404）。
+- 前端拆成四个脚本，**加载顺序即依赖顺序**：
+  `i18n.js` → `app-core.js` → `app-views.js` → `app-actions.js` → `app.js`。
+  每个脚本各自一个 IIFE，靠 `window.SSXNG` 互相引用；只有最后那个 `app.js` 会产生副作用
+  （绑定 document 上的事件委托、首次拉取状态），其余文件只定义东西。
+- **不要用模块化 import**：asset server 下相对路径 `import` 会 404，`index.html` 里也不要用
+  `type="module"`（那样脚本会被推迟到 DOMContentLoaded 之后，且 `file://` 下 CORS 会失败）。
+- 跨文件引用规则：只能解构**在它之前加载**的文件导出的名字
+  （`const {call, App} = S;`）；要引用后面文件里的东西必须写 `S.name(...)`。
+  违反这条会在启动时静默拿到 `undefined`，`scripts/ui-check/measure.js` 里有静态断言拦住它。
 
 ## 7. 文件交付清单（只允许改这些）
 
 ```
 frontend/src/index.html
 frontend/src/main.css
-frontend/src/app.js
 frontend/src/i18n.js
+frontend/src/app-core.js
+frontend/src/app-views.js
+frontend/src/app-actions.js
+frontend/src/app.js
 ```
+
+`app-core.js` 放常量、`App` 状态、通用工具、状态规整与后端调用；`app-views.js` 放所有
+`render*` 与事件订阅；`app-actions.js` 放表单绑定、设置读写与 `ACTIONS` 表；
+`app.js` 只做启动。新增前端文件时，`index.html`、`scripts/ui-check.sh` 的拷贝列表与
+`scripts/ui-check/measure.js` 的 `staticScriptOrderCheck` 三处要一起改。
 
 不要修改任何 `.go`、`wails.json`、`build/` 下的文件。

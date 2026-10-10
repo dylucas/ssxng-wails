@@ -35,6 +35,79 @@ func TestAddAndEntries(t *testing.T) {
 	}
 }
 
+// TestAddEntryMatchesTheStoredLine pins the contract app.logf relies on: the
+// entry handed back is exactly the one that landed in the ring (same sequence
+// number, same normalised level), so the file log and the ssxng:log event can
+// never drift from what GetLogs returns.
+func TestAddEntryMatchesTheStoredLine(t *testing.T) {
+	b := New(10)
+	// "WARNING" is not a level we accept; the buffer must normalise it, and the
+	// caller must see the normalised value rather than its own input.
+	got := b.AddEntry("WARNING", "proxy", "hello")
+	stored := b.Entries(1)
+	if len(stored) != 1 {
+		t.Fatalf("应有 1 条日志，实际 %d", len(stored))
+	}
+	if got != stored[0] {
+		t.Errorf("AddEntry 返回的条目与缓冲里的不一致:\n got %+v\nwant %+v", got, stored[0])
+	}
+	if got.Level != "info" {
+		t.Errorf("级别应被规整为 info，实际 %q", got.Level)
+	}
+	if got.Seq != b.LastSeq() {
+		t.Errorf("返回的序号应为最新序号 %d，实际 %d", b.LastSeq(), got.Seq)
+	}
+	if got.Scope != "proxy" || got.Message != "hello" {
+		t.Errorf("范围/内容丢失: %+v", got)
+	}
+	if got.Time.IsZero() {
+		t.Error("返回的条目应带时间戳")
+	}
+
+	// Add still behaves as before: it writes the same line and discards it.
+	b.Add("error", "pac", "second")
+	all := b.Entries(10)
+	if len(all) != 2 || all[1].Message != "second" || all[1].Level != "error" {
+		t.Fatalf("Add 写入的内容不对: %+v", all)
+	}
+}
+
+// TestAddEntryKeepsSequenceMonotonic guards the frontend's "everything after
+// seq" cursor: every AddEntry must advance it, including the very first one.
+func TestAddEntryKeepsSequenceMonotonic(t *testing.T) {
+	b := New(10)
+	first := b.AddEntry("info", "s", "a")
+	if first.Seq <= 0 {
+		t.Fatalf("首个序号应为正数，实际 %d", first.Seq)
+	}
+	second := b.AddEntry("info", "s", "b")
+	if second.Seq != first.Seq+1 {
+		t.Errorf("序号应逐条递增: %d -> %d", first.Seq, second.Seq)
+	}
+	b.Clear()
+	third := b.AddEntry("info", "s", "c")
+	if third.Seq <= second.Seq {
+		t.Errorf("清空后序号仍应递增: %d -> %d", second.Seq, third.Seq)
+	}
+}
+
+// TestAddEntryNotifiesSubscribers checks Add still fans out after the split.
+func TestAddEntryNotifiesSubscribers(t *testing.T) {
+	b := New(10)
+	ch, cancel := b.Subscribe(4)
+	defer cancel()
+
+	want := b.AddEntry("warn", "proxy", "fanout")
+	select {
+	case e := <-ch:
+		if e != want {
+			t.Errorf("订阅者收到的条目与返回的不一致:\n got %+v\nwant %+v", e, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("订阅者没有收到 AddEntry 写入的日志")
+	}
+}
+
 func TestRingDropsOldest(t *testing.T) {
 	b := New(3)
 	for i := 0; i < 10; i++ {

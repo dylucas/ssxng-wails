@@ -37,11 +37,10 @@ type Options struct {
 
 // Result is the outcome of a generation run.
 type Result struct {
-	Content    []byte
-	RuleCount  int // rules embedded in the PAC file
-	GFWCount   int // rules that came from the downloaded list
-	UserCount  int // rules that came from user-rule.txt
-	SkipReason string
+	Content   []byte
+	RuleCount int // rules embedded in the PAC file
+	GFWCount  int // rules that came from the downloaded list
+	UserCount int // rules that came from user-rule.txt
 }
 
 // Generate renders the PAC file.

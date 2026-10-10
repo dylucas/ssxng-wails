@@ -32,7 +32,6 @@ type Server struct {
 	srv   *http.Server
 	ln    net.Listener
 	url   string
-	last  []byte
 	hits  atomic.Int64
 	lastE atomic.Value // string
 }

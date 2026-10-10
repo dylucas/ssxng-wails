@@ -13,8 +13,10 @@ const {spawn} = require('node:child_process');
 
 const dir = process.argv[2];
 const chromePath = process.argv[3];
+// 仓库根目录：静态检查需要读 internal/api/types.go，harness 目录里没有它。
+const repoRoot = process.argv[4] || path.resolve(__dirname, '..', '..');
 if (!dir || !chromePath) {
-    console.error('用法: measure.js <harness 目录> <chrome 路径>');
+    console.error('用法: measure.js <harness 目录> <chrome 路径> [仓库根目录]');
     process.exit(2);
 }
 
@@ -59,6 +61,169 @@ function staticHtmlCheck(htmlPath) {
     check(!/main\.js/.test(html), 'index.html 不再引用已删除的 main.js');
 }
 
+// 前端拆成四个脚本后，"加载顺序"和"各自一个 IIFE"都成了隐性约定：顺序错则某些
+// 名字解构出来是 undefined，漏掉 IIFE 则会把所有内部名字泄漏成全局。
+function staticScriptOrderCheck(htmlPath) {
+    const html = fs.readFileSync(htmlPath, 'utf8');
+    const srcs = [];
+    const re = /<script[^>]*\ssrc="\.\/([\w.-]+\.js)"[^>]*>/g;
+    let m;
+    while ((m = re.exec(html)) !== null) srcs.push(m[1]);
+    const app = srcs.filter(function (s) { return s !== 'stub.js' && s !== 'metrics.js'; });
+    const want = ['i18n.js', 'app-core.js', 'app-views.js', 'app-actions.js', 'app.js'];
+    check(app.join(',') === want.join(','),
+        'app 脚本按 i18n → core → views → actions → app 的顺序加载 (' + app.join(' → ') + ')');
+    check(srcs[srcs.length - 1] === 'metrics.js',
+        '度量脚本挂在最后一个 app 脚本之后 (' + srcs[srcs.length - 1] + ')');
+
+    // i18n.js 只是一个文案表（window.T = {...}），不参与 IIFE 约定；
+    // app-core.js 是第一个 app 脚本，它自己创建命名空间，不需要"安全退出"。
+    const wrapped = want.slice(1);
+    wrapped.forEach(function (name) {
+        let text;
+        try {
+            text = fs.readFileSync(path.join(dir, name), 'utf8');
+        } catch (e) {
+            check(false, '脚本 ' + name + ' 可读');
+            return;
+        }
+        const lines = text.split('\n');
+        const opens = lines.filter(function (l) { return l.trim() === '(function () {'; }).length;
+        const closes = lines.filter(function (l) { return l.trim() === '})();'; }).length;
+        check(opens === 1 && closes === 1,
+            name + ' 用一个 IIFE 包住（开 ' + opens + ' / 闭 ' + closes + '）');
+        check(!/^\s*(import|export)\s/m.test(text), name + ' 不是 ES 模块（无 import/export）');
+        const topLevel = lines.filter(function (l) {
+            return /^(function|const|let|var|class)\s/.test(l);
+        });
+        check(topLevel.length === 0,
+            name + ' 没有顶层声明 (' + topLevel.length + ' 处)');
+    });
+
+    // core 之后的每个脚本都要先确认命名空间存在再解构。
+    wrapped.slice(1).forEach(function (name) {
+        const text = fs.readFileSync(path.join(dir, name), 'utf8');
+        check(/const S = window\.SSXNG;\s*\n\s*if \(!S\) return;/.test(text),
+            name + ' 在核心脚本缺失时安全退出');
+    });
+}
+
+// 完整校验四个脚本之间的名字接线，而不是抽查几个名字：
+//   · 每个 `const {a, b} = S;` 里的名字，必须由"更早加载"的文件导出；
+//   · 每处 `S.name` 引用的名字，必须由某个文件导出。
+// 拆分后新增跨文件调用却忘了导出、或把解构写到了赋值之前，都会在这里失败。
+function staticNamespaceCheck() {
+    const order = ['app-core.js', 'app-views.js', 'app-actions.js', 'app.js'];
+    const src = {};
+    order.forEach(function (f) {
+        src[f] = fs.readFileSync(path.join(dir, f), 'utf8');
+    });
+
+    function code(text) {
+        // 去掉注释与字符串，避免把文案里的 S.xxx 当成引用。
+        return text.replace(/\/\*[\s\S]*?\*\//g, ' ')
+            .split('\n').map(function (l) { return l.replace(/\/\/.*$/, ''); }).join('\n')
+            .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+            .replace(/"(?:[^"\\]|\\.)*"/g, '""');
+    }
+
+    const exported = {};      // file -> [names]
+    const destructured = {};  // file -> [names]
+    const used = {};          // file -> Set(S.name targets)
+
+    order.forEach(function (f) {
+        const text = code(src[f]);
+        const ex = [];
+        const asg = /Object\.assign\(S,\s*\{([\s\S]*?)\}\)/.exec(text);
+        if (asg) {
+            asg[1].split(/[,\n]/).forEach(function (p) {
+                p = p.trim();
+                if (p) ex.push(p);
+            });
+        }
+        exported[f] = ex;
+
+        const ds = [];
+        const dasg = /const\s*\{([\s\S]*?)\}\s*=\s*S;/.exec(text);
+        if (dasg) {
+            dasg[1].split(/[,\n]/).forEach(function (p) {
+                p = p.trim();
+                if (p) ds.push(p);
+            });
+        }
+        destructured[f] = ds;
+
+        const set = new Set();
+        const re = /(?<![\w$.])S\.([A-Za-z_$][\w$]*)/g;
+        let m;
+        while ((m = re.exec(text)) !== null) set.add(m[1]);
+        used[f] = set;
+    });
+
+    check(order.every(function (f) { return exported[f].length > 0; }),
+        '四个脚本都往 window.SSXNG 上导出名字 (' +
+        order.map(function (f) { return f + ':' + exported[f].length; }).join(' ') + ')');
+
+    order.forEach(function (f, idx) {
+        const earlier = new Set();
+        order.slice(0, idx).forEach(function (g) {
+            exported[g].forEach(function (n) { earlier.add(n); });
+        });
+        const missing = destructured[f].filter(function (n) { return !earlier.has(n); });
+        check(missing.length === 0,
+            f + ' 解构的名字都由更早的脚本导出' +
+            (missing.length ? '，缺失: ' + missing.join(', ') : ''));
+    });
+
+    const all = new Set();
+    order.forEach(function (f) { exported[f].forEach(function (n) { all.add(n); }); });
+    order.forEach(function (f) {
+        const missing = Array.from(used[f]).filter(function (n) { return !all.has(n); });
+        check(missing.length === 0,
+            f + ' 里每处 S.name 都能在某个脚本的导出里找到' +
+            (missing.length ? '，未导出: ' + missing.join(', ') : ''));
+    });
+}
+
+// stub.js 的 fixture 必须覆盖 internal/api/types.go 里的字段：少字段时前端
+// normalizer 会走默认值，视图静默变空，而 ui-check 只看"非空"就会放过。
+function staticAPIShapeCheck(repoRoot) {
+    const types = fs.readFileSync(path.join(repoRoot, 'internal/api/types.go'), 'utf8');
+    const stub = fs.readFileSync(path.join(dir, 'stub.js'), 'utf8');
+
+    function jsonTags(typeName) {
+        const m = new RegExp('type ' + typeName + ' struct \\{([\\s\\S]*?)\\n\\}').exec(types);
+        if (!m) return null;
+        const tags = [];
+        const re = /`json:"([^",]+)"/g;
+        let t;
+        while ((t = re.exec(m[1])) !== null) tags.push(t[1]);
+        return tags;
+    }
+
+    const settings = jsonTags('SettingsView');
+    check(settings !== null, 'types.go 里能找到 SettingsView');
+    if (settings) {
+        const missing = settings.filter(function (k) {
+            return !new RegExp('(^|[\\s{,])' + k + '\\s*:').test(stub);
+        });
+        check(missing.length === 0,
+            'stub.js 的 settings fixture 覆盖 SettingsView 全部字段' +
+            (missing.length ? '，缺失: ' + missing.join(', ') : ''));
+    }
+
+    const stateFields = jsonTags('State');
+    check(stateFields !== null, 'types.go 里能找到 State');
+    if (stateFields) {
+        const missing = stateFields.filter(function (k) {
+            return !new RegExp('(^|\\n)\\s*' + k + '\\s*:').test(stub);
+        });
+        check(missing.length === 0,
+            'stub.js 的 state fixture 覆盖 State 全部字段' +
+            (missing.length ? '，缺失: ' + missing.join(', ') : ''));
+    }
+}
+
 // ---------------------------------------------------------------- CDP 客户端
 function rpc(url) {
     return new Promise(function (resolve, reject) {
@@ -66,6 +231,7 @@ function rpc(url) {
         let nextId = 1;
         const pending = new Map();
         const eventWaiters = [];
+        const eventListeners = {};
         ws.addEventListener('message', function (ev) {
             let msg;
             try { msg = JSON.parse(ev.data); } catch (e) { return; }
@@ -77,6 +243,9 @@ function rpc(url) {
                 return;
             }
             if (msg.method) {
+                (eventListeners[msg.method] || []).forEach(function (cb) {
+                    try { cb(msg.params); } catch (e) { /* 监听器自己的错不该拖垮检查 */ }
+                });
                 for (let i = eventWaiters.length - 1; i >= 0; i--) {
                     if (eventWaiters[i].method === msg.method) {
                         const w = eventWaiters.splice(i, 1)[0];
@@ -106,6 +275,9 @@ function rpc(url) {
                             if (i >= 0) { eventWaiters.splice(i, 1); rej(new Error('等待事件超时: ' + method)); }
                         }, timeoutMs || 20000);
                     });
+                },
+                on: function (method, cb) {
+                    (eventListeners[method] = eventListeners[method] || []).push(cb);
                 },
                 close: function () { try { ws.close(); } catch (e) { /* 忽略 */ } }
             });
@@ -220,9 +392,15 @@ function assertContrast(m, label) {
 async function main() {
     staticCssCheck(path.join(dir, 'main.css'));
     staticHtmlCheck(path.join(dir, 'harness.html'));
+    staticScriptOrderCheck(path.join(dir, 'harness.html'));
+    staticNamespaceCheck();
+    staticAPIShapeCheck(repoRoot);
 
     const run = await launch(chromePath, path.join(dir, 'profile'));
     const client = await rpc(run.wsURL);
+    // 页面未捕获异常一律当成失败：脚本抛错时界面可能只是静默变空，后面的断言
+    // 会以各种奇怪的方式失败（例如读 null.indexOf），看不出真正原因。
+    const pageErrors = [];
     let exitCode = 0;
     try {
         const {targetId} = await client.send('Target.createTarget', {url: 'about:blank'});
@@ -231,6 +409,11 @@ async function main() {
 
         await s('Page.enable');
         await s('Runtime.enable');
+        client.on('Runtime.exceptionThrown', function (p) {
+            const d = (p && p.exceptionDetails) || {};
+            const desc = (d.exception && (d.exception.description || d.exception.value)) || d.text;
+            pageErrors.push(String(desc).split('\n')[0]);
+        });
         const loaded = client.waitFor('Page.loadEventFired', 30000);
         await s('Page.navigate', {url: 'file://' + path.join(dir, 'harness.html')});
         await loaded;
@@ -242,6 +425,37 @@ async function main() {
             }
             return r.result.value;
         }
+
+        // 0) 命名空间：四个脚本都跑到了，而且各自把该公开的名字放上了 window.SSXNG。
+        // 静态检查只能证明"顺序写对了"，这里证明"顺序真的能跑通"——某个文件漏了
+        // Object.assign，或解构发生在赋值之前，都会在这里立刻暴露成 undefined。
+        // 只列真正跨文件用到的名字（各文件的内部函数不导出，故意不在这里断言）。
+        const ns = await evaluate('(function(){' +
+            'var S=window.SSXNG;' +
+            'if(!S)return {ok:false,why:"window.SSXNG 缺失"};' +
+            'var need={ "app-core.js":["T","App","esc","state","call","refreshState",' +
+            '"normalizeState","copyText","fmtBytes","pkey","toast"],' +
+            '"app-views.js":["renderView","renderSidebar","applyState","bindEvents","setView"],' +
+            '"app-actions.js":["ACTIONS","loadLogs","loadServices","updateDraftField",' +
+            '"updateEditorField","updateServiceToggle","validateServer","refreshSettingsFeedback"],' +
+            '"app.js":["boot"] };' +
+            'var bad=[];' +
+            'Object.keys(need).forEach(function(f){need[f].forEach(function(k){' +
+            'if(S[k]===undefined)bad.push(f+":"+k);});});' +
+            'return {ok:bad.length===0, why:bad.join(","), keys:Object.keys(S).length,' +
+            'bootRan:!!(S.App&&S.App.state)};})()');
+        check(ns && ns.ok, '四个脚本都执行了且 window.SSXNG 暴露了预期接口' +
+            (ns && ns.why ? '，缺失: ' + ns.why : ''));
+        check(ns && ns.keys > 30, 'window.SSXNG 导出的名字数量合理 (' + (ns && ns.keys) + ')');
+        check(ns && ns.bootRan, 'app.js 跑完了启动流程（状态已进 App.state）');
+        // 拆分不能让内部名字泄漏成全局：抽查几个只应存在于闭包里的名字。
+        const leaked = await evaluate('["esc","pkey","normalizeState","ACTIONS","renderView","closeMenu"]' +
+            '.filter(function(n){return n in window;})');
+        check(leaked.length === 0,
+            '拆分后没有把内部名字泄漏成全局变量' + (leaked.length ? ': ' + leaked.join(', ') : ''));
+        check(pageErrors.length === 0,
+            '页面加载与启动期间没有未捕获异常' +
+            (pageErrors.length ? ': ' + pageErrors.slice(0, 3).join(' | ') : ''));
 
         // 不改视图、只改视口与主题的度量：用于"刚点开菜单"这类不能被重绘打断的场景
         async function snap(width, height, theme) {
@@ -342,6 +556,8 @@ async function main() {
 
         const modesPage = await measure(980, 680, 'dark', 'modes');
         // 门槛从 1275 提到 1450：本轮在"本地监听"卡里新增了"命令行代理"块（约 160px）。
+        // 后来同一张卡又加了"启用 UDP 转发"复选框：它和"跟随全局"叠在同一格里
+        // （.check-stack），实测 1442px，没有越过 1450。
         // 这是新增内容，不是排版退化，所以门槛跟着走；但新增块自身单独设上界，
         // 免得以后悄悄膨胀还被这条总高度断言吸收掉。
         check(modesPage.mainScroll.scroll <= 1450,
@@ -476,8 +692,232 @@ async function main() {
         check(clip.clipboardCount === 1, '复制只写一次剪贴板 (' + clip.clipboardCount + ')');
         density.push('命令行代理 2 条命令，复制内容与显示逐字一致');
 
+        // 4g) 日志：去重、水位线、滚动位置。这一组对应三个静默的回归：
+        //     同一条日志被记两次（seq=0 时旧代码漏过）、实时日志先到时整段历史
+        //     被丢弃、以及状态推送把正在往上翻的用户顶回最新一行。
+        await evaluate('window.__ui.selectView("logs")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        const beforeLogs = await evaluate('window.__UI_LOG_STATE().count');
+        check(beforeLogs > 0, '日志页渲染出日志行 (' + beforeLogs + ' 行)');
+
+        // 同一个 seq 推两次只能出现一次
+        await evaluate('window.__UI_PUSH_LOG({seq: 900001, message: "去重测试"})');
+        await new Promise(function (r) { setTimeout(r, 40); });
+        const onceLogs = await evaluate('window.__UI_LOG_STATE().count');
+        await evaluate('window.__UI_PUSH_LOG({seq: 900001, message: "去重测试"})');
+        await new Promise(function (r) { setTimeout(r, 40); });
+        const twiceLogs = await evaluate('window.__UI_LOG_STATE().count');
+        check(onceLogs === beforeLogs + 1 && twiceLogs === onceLogs,
+            '相同 seq 的日志只记一次 (' + beforeLogs + ' -> ' + onceLogs + ' -> ' + twiceLogs + ')');
+
+        // seq 更小的（迟到的重放）也必须被水位线挡住
+        await evaluate('window.__UI_PUSH_LOG({seq: 5, message: "迟到的旧日志"})');
+        await new Promise(function (r) { setTimeout(r, 40); });
+        check(await evaluate('window.__UI_LOG_STATE().count') === twiceLogs,
+            '迟到的低 seq 日志被水位线挡掉');
+
+        // 往上翻之后，一次状态推送不能把滚动位置重置到底部。
+        // 必须先塞满日志让列表真的可滚动：内容不足时 scrollTop 恒为 0，
+        // 断言会在"没有回归"和"有回归"两种情况下都通过，等于白测。
+        await evaluate('window.__ui.selectView("logs")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        await evaluate('(function(){for(var i=0;i<120;i++){' +
+            'window.__UI_PUSH_LOG({seq: 910000+i, message: "滚动测试 " + i});}return true;})()');
+        await new Promise(function (r) { setTimeout(r, 120); });
+        const scrollable = await evaluate('(function(){var l=document.getElementById("log-list");' +
+            'return l.scrollHeight - l.clientHeight;})()');
+        check(scrollable > 40, '日志列表已塞满到可滚动（可滚动高度 ' + scrollable + 'px）');
+
+        await evaluate('(function(){var l=document.getElementById("log-list");l.scrollTop=0;' +
+            'l.dispatchEvent(new Event("scroll"));return l.scrollTop;})()');
+        await evaluate('window.__UI_PUSH({enabled: true})');
+        await new Promise(function (r) { setTimeout(r, 100); });
+        const keptTop = await evaluate('window.__UI_LOG_STATE().scrolled');
+        check(keptTop <= 1, '状态推送不会把翻到顶部的日志列表顶回底部 (scrollTop=' + keptTop + ')');
+        density.push('日志去重按 seq 水位线，重渲染保留滚动位置');
+
+        // 4g2) 复选框一次交互只处理一次。浏览器对复选框会同时派发 input 与 change；
+        //      两个事件都绑到同一个处理器时，每次勾选都会跑两遍（下拉框那条路更明显，
+        //      但下拉框在第一次处理时就会被整页重绘换掉，第二个事件落在已脱离文档的
+        //      节点上、根本冒泡不到 document，所以真正能观察到重复的是复选框）。
+        //      updateDraftField 会走 refreshSettingsFeedback，它每次都重写
+        //      #settings-errors —— 一次勾选只能写一次。
+        await evaluate('window.__ui.selectView("modes")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        const checkPasses = await evaluate('(function(){' +
+            'var box=document.getElementById("settings-errors");' +
+            'if(!box)return -1;' +
+            'var d=Object.getOwnPropertyDescriptor(Element.prototype,"innerHTML");' +
+            'window.__FEEDBACK=0;' +
+            'Object.defineProperty(box,"innerHTML",{configurable:true,' +
+            'get:function(){return d.get.call(this);},' +
+            'set:function(v){window.__FEEDBACK++;return d.set.call(this,v);}});' +
+            'var cb=document.querySelector(\'#body-modes [data-key="clearProxyOnQuit"]\');' +
+            'if(!cb)return -2;' +
+            'cb.checked=!cb.checked;' +
+            'cb.dispatchEvent(new Event("input",{bubbles:true}));' +
+            'cb.dispatchEvent(new Event("change",{bubbles:true}));' +
+            'return window.__FEEDBACK;})()');
+        check(checkPasses === 1, '复选框一次交互只处理一次（input+change 不重复，实际 ' + checkPasses + ' 次）');
+
+        // 文本框同理：敲键（input）与失焦（change）各一次，但失焦那次不能重复处理。
+        await evaluate('window.__ui.selectView("modes")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        const textPasses = await evaluate('(function(){' +
+            'var box=document.getElementById("settings-errors");' +
+            'if(!box)return -1;' +
+            'var d=Object.getOwnPropertyDescriptor(Element.prototype,"innerHTML");' +
+            'window.__FEEDBACK2=0;' +
+            'Object.defineProperty(box,"innerHTML",{configurable:true,' +
+            'get:function(){return d.get.call(this);},' +
+            'set:function(v){window.__FEEDBACK2++;return d.set.call(this,v);}});' +
+            'var inp=document.querySelector(\'#body-modes [data-key="socksPort"]\');' +
+            'if(!inp)return -2;' +
+            'inp.value="1088";' +
+            'inp.dispatchEvent(new Event("input",{bubbles:true}));' +
+            'inp.dispatchEvent(new Event("change",{bubbles:true}));' +
+            'return window.__FEEDBACK2;})()');
+        check(textPasses === 1 || textPasses === 2,
+            '文本框的 input 与 change 不会叠加处理（实际 ' + textPasses + ' 次）');
+        // 上面这条是宽松的（文本框本来就是 input 每次敲键都处理、change 只该在
+        // 值真的变了时补一次），真正钉死重复的是复选框那条；这里只保证不会失控。
+
+        // 4g2b) UDP 开关必须真的在设置页里、并且真的进了保存载荷。
+        //   只断言"有个 data-key=udpEnabled 的复选框"是不够的：一个画出来但没接线的
+        //   开关，勾了也不会进 SaveSettings 的参数，用户看到勾选却在重启后失效。
+        await evaluate('window.__ui.selectView("modes")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        const udpBox = await evaluate('(function(){' +
+            'var cb=document.querySelector(\'#body-modes [data-key="udpEnabled"]\');' +
+            'if(!cb)return null;' +
+            'return {type: cb.type, checked: cb.checked, inGrid: !!cb.closest(".form-grid"),' +
+            'stacked: !!cb.closest(".check-stack")};})()');
+        check(udpBox !== null, '设置页有"启用 UDP 转发"复选框');
+        check(udpBox && udpBox.type === 'checkbox', 'UDP 开关是复选框 (type=' + (udpBox && udpBox.type) + ')');
+        check(udpBox && udpBox.checked === true, 'UDP 开关默认勾选（与 config 默认值一致）');
+        check(udpBox && udpBox.inGrid && udpBox.stacked,
+            'UDP 开关在监听网格里且与"跟随全局"叠在同一格（不为它多占一整行）');
+
+        // 勾掉 -> 保存，载荷里必须是 false。stub 把入参记在 __UI_LAST_ARGS 里。
+        await evaluate('window.__UI_RESET_CALLS()');
+        await evaluate('(function(){' +
+            'var cb=document.querySelector(\'#body-modes [data-key="udpEnabled"]\');' +
+            'cb.checked=false;' +
+            'cb.dispatchEvent(new Event("change",{bubbles:true}));return true;})()');
+        await new Promise(function (r) { setTimeout(r, 60); });
+        await evaluate('document.querySelector(\'[data-act="settings-save"]\').click()');
+        await new Promise(function (r) { setTimeout(r, 120); });
+        const savedArgs = await evaluate('window.__UI_LAST_ARGS("SaveSettings")');
+        let savedUDP = null;
+        try {
+            const parsed = JSON.parse(savedArgs);
+            savedUDP = parsed && parsed[0] ? parsed[0].udpEnabled : null;
+        } catch (e) { savedUDP = 'PARSE_FAIL'; }
+        check(savedUDP === false,
+            '取消勾选后 SaveSettings 载荷里的 udpEnabled 为 false (实际 ' + JSON.stringify(savedUDP) + ')');
+        check(await evaluate('window.__UI_CALL_COUNT("SaveSettings")') === 1,
+            '保存只发一次 SaveSettings (' + (await evaluate('window.__UI_CALL_COUNT("SaveSettings")')) + ' 次)');
+
+        // 状态页：UDP 开启时 SOCKS 那一项后面要带上 UDP 标记，否则用户看不出它在跑。
+        await evaluate('window.__UI_PUSH({enabled: true})');
+        await evaluate('window.__ui.selectView("status")');
+        await new Promise(function (r) { setTimeout(r, 100); });
+        const socksFact = await evaluate('(function(){' +
+            'var f=document.querySelector("#body-status .facts .fact");' +
+            'return f ? f.textContent : "";})()');
+        check(socksFact.indexOf("UDP") >= 0,
+            '状态页在 UDP 开启时标出 UDP（' + JSON.stringify(socksFact) + '）');
+
+        // 还原：把测试期间挂在元素上的 innerHTML 覆盖去掉，并恢复默认日志等级，
+        // 后面的截图才不会被测试改过的状态污染。
+        await evaluate('(function(){var b=document.getElementById("body-logs");' +
+            'if(b)delete b.innerHTML;return true;})()');
+        await evaluate('(function(){var e=document.getElementById("settings-errors");' +
+            'if(e)delete e.innerHTML;return true;})()');
+
+        // 4g3) 离线页的"重试连接"会重新跑 boot()，而 boot() 在无后端时会提前返回
+        //      ——watchAppearance() 正好在提前返回之前。所以重试必须幂等，否则每次
+        //      点重试都往 matchMedia 上再挂一个永不摘除的监听。页面加载时已经注册过
+        //      一个，这里把真实的 go 换成桩制造离线状态，数"额外注册"了几次。
+        //      点击是经 onClick 的微任务派发的，必须等一拍再读计数。
+        const mediaSetup = await evaluate('(function(){' +
+            'window.__REAL_GO=window.go;' +
+            'window.__REAL_MM=window.matchMedia;' +
+            'window.__MEDIA=0;' +
+            'window.matchMedia=function(q){var mq=window.__REAL_MM.call(window,q);' +
+            'var add=mq.addEventListener.bind(mq);' +
+            'mq.addEventListener=function(n,f){if(n==="change")window.__MEDIA++;return add(n,f);};' +
+            'return mq;};' +
+            'delete window.go;' +
+            'var btn=document.querySelector(\'[data-act="retry-backend"]\');' +
+            'if(!btn)return false;' +
+            'btn.click();btn.click();btn.click();' +
+            'return true;})()');
+        await new Promise(function (r) { setTimeout(r, 250); });
+        const mediaWatches = await evaluate('(function(){' +
+            'var n=window.__MEDIA;' +
+            'window.go=window.__REAL_GO;' +
+            'window.matchMedia=window.__REAL_MM;' +
+            'return n;})()');
+        check(mediaSetup === true && mediaWatches >= 0 && mediaWatches <= 1,
+            '离线页连点三次"重试连接"不会重复注册 theme 监听（3 次点击 -> ' + mediaWatches + ' 次注册）');
+        // 有修复时这里是 0（加载时已注册过，重试不再补）；没有修复时是 3。
+        // 离线状态可能已经把界面切走了，恢复成有后端的正常状态
+        await evaluate('window.go && window.__ui.selectView("status")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        // 塞进去的 120 条要清掉，后面的截图才不会被这批测试日志污染
+        await evaluate('window.__ui.selectView("logs")');
+        await evaluate('document.querySelector(\'[data-act="logs-clear"]\').click()');
+        await new Promise(function (r) { setTimeout(r, 80); });
+
+        // 4h) 复制失败时不能留下离屏 <textarea>：execCommand 抛异常是最容易触发
+        //     这条路径的方式（旧代码在 catch 里直接 return，节点就留在页面上了）。
+        await evaluate('window.__ui.selectView("modes")');
+        await new Promise(function (r) { setTimeout(r, 60); });
+        const leak = await evaluate('(function(){' +
+            'var origRT=window.runtime.ClipboardSetText;' +
+            'window.runtime.ClipboardSetText=function(){return Promise.reject(new Error("boom"));};' +
+            'var origExec=document.execCommand;' +
+            'document.execCommand=function(){throw new Error("boom");};' +
+            'Object.defineProperty(navigator,"clipboard",{configurable:true,' +
+            'value:{writeText:function(){return Promise.reject(new Error("boom"));}}});' +
+            'document.querySelector(\'[data-act="copy-cli-proxy"][data-id="socks"]\').click();' +
+            'return new Promise(function(res){setTimeout(function(){' +
+            'var n=document.querySelectorAll("textarea.copy-buffer").length;' +
+            'window.runtime.ClipboardSetText=origRT;' +
+            'document.execCommand=origExec;' +
+            'res(n);},150);});})()');
+        check(leak === 0, '三条复制路径全部失败后没有残留的离屏 textarea (' + leak + ' 个)');
+
+        // 4i) 连点只发一次 RPC。删除是最危险的那个（旧代码还会重复弹确认框），
+        //     上移与选中同样绕过过 runAction 的 pending 门。
+        const dupCalls = await evaluate('(function(){' +
+            'window.__UI_RESET_CALLS();' +
+            'window.__CONFIRMS=0;' +
+            'window.confirm=function(){window.__CONFIRMS++;return true;};' +
+            'window.__ui.selectView("servers");' +
+            'return true;})()');
+        check(dupCalls === true, '测试前切到服务器页');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        await evaluate('(function(){var b=document.querySelector(\'[data-act="delete-server"]\');' +
+            'b.click();b.click();b.click();return true;})()');
+        await new Promise(function (r) { setTimeout(r, 200); });
+        const delCalls = await evaluate('window.__UI_CALL_COUNT("DeleteServer")');
+        const confirms = await evaluate('window.__CONFIRMS');
+        check(delCalls === 1, '连点三次删除只发一次 DeleteServer (' + delCalls + ' 次)');
+        check(confirms === 1, '连点三次删除只弹一次确认框 (' + confirms + ' 次)');
+
+        await evaluate('window.__UI_RESET_CALLS()');
+        await evaluate('(function(){var b=document.querySelector(\'[data-act="select-server"]\');' +
+            'if(b){b.click();b.click();}return !!b;})()');
+        await new Promise(function (r) { setTimeout(r, 200); });
+        const selCalls = await evaluate('window.__UI_CALL_COUNT("SelectServer")');
+        check(selCalls <= 1, '连点选中节点不会重复发 SelectServer (' + selCalls + ' 次)');
+        density.push('删除/选中在途只发一次 RPC，确认框也只弹一次');
+
         // 还原 fixture，后面的截图用原始状态
         await evaluate('window.__UI_PUSH()');
+        await evaluate('window.__ui.selectView("status")');
 
         // 窄窗（侧栏折叠）下两栏 kv 必须回退单列，否则文字会被挤
         const narrow = await measure(700, 680, 'dark', 'status');
@@ -588,9 +1028,16 @@ async function main() {
         fs.writeFileSync(idleFile, Buffer.from(idleShot.data, 'base64'));
         passes.push('截图: ' + idleFile);
         await evaluate('window.__UI_PUSH()');
+    } catch (err) {
+        // 让断言失败变成一条可读的失败记录，而不是把栈顶的行号丢给用户
+        check(false, '检查过程异常中断: ' + (err && err.message ? err.message : String(err)));
     } finally {
         client.close();
         try { run.proc.kill('SIGKILL'); } catch (e) { /* 忽略 */ }
+    }
+    if (pageErrors.length) {
+        check(false, '未捕获异常汇总 (' + pageErrors.length + ' 条): ' +
+            pageErrors.slice(0, 5).join(' | '));
     }
 
     console.log('通过 ' + passes.length + ' 项检查');

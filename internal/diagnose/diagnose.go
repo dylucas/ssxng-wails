@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -50,7 +49,6 @@ type Context struct {
 	GFWListFile   string
 	UserRuleFile  string
 	LogFile       string
-	AppliedMode   string
 	Version       string
 }
 
@@ -323,6 +321,3 @@ func humanBytes(n int64) string {
 	}
 	return fmt.Sprintf("%.1f %s", f, units[i])
 }
-
-// ConfigDirFor is a small helper for tests.
-func ConfigDirFor(base string) string { return filepath.Join(base, "SSXNG") }

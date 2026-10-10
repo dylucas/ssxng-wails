@@ -10,10 +10,10 @@ type Menu struct {
 	OnMode   func(mode string)
 	OnShow   func()
 	OnQuit   func()
+	OnCopy   func(command string)
 
-	// State returns the tooltip title, whether the proxy is on, a status line,
-	// the current mode and the modes that should be offered.
-	State func() (title string, enabled bool, status string, currentMode string, modes []ModeOption)
+	// State returns the snapshot the menu should render.
+	State func() Snapshot
 }
 
 // Tray is a live status item. On platforms without AppKit it is never created.

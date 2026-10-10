@@ -14,7 +14,6 @@ import "C"
 
 import (
 	"errors"
-	"strings"
 	"sync"
 	"unsafe"
 )
@@ -26,9 +25,14 @@ type Menu struct {
 	OnShow   func()
 	OnQuit   func()
 
-	// State returns the tooltip title, whether the proxy is on, a status line,
-	// the current mode and the modes that should be offered.
-	State func() (title string, enabled bool, status string, currentMode string, modes []ModeOption)
+	// OnCopy runs after a copy-command item was clicked, with the text that was
+	// copied. The pasteboard is already written by AppKit at that point, so
+	// copying works even when no window exists; this hook only exists so the app
+	// can log it and toast.
+	OnCopy func(command string)
+
+	// State returns the snapshot the menu should render.
+	State func() Snapshot
 }
 
 // Tray is a live status item.
@@ -87,27 +91,23 @@ func (t *Tray) Refresh() {
 	if t == nil || t.menu.State == nil {
 		return
 	}
-	title, enabled, status, currentMode, modes := t.menu.State()
+	s := t.menu.State()
 	// The menu labels live in Go (they are the same strings the window uses),
-	// so they are handed to AppKit as "key|title" pairs.
-	spec := make([]string, 0, len(modes))
-	for _, m := range modes {
-		if strings.TrimSpace(m.Key) == "" {
-			continue
-		}
-		spec = append(spec, m.Key+"|"+m.Title)
-	}
-	cTitle := C.CString(title)
-	cStatus := C.CString(status)
-	cMode := C.CString(currentMode)
-	cModes := C.CString(strings.Join(spec, "\n"))
+	// so they are handed to AppKit as "key|title" and "key|title|command" pairs.
+	cModesStr, cCmdsStr := EncodeMenuSpecs(s.Modes, s.Commands)
+	cTitle := C.CString(s.Title)
+	cStatus := C.CString(s.Status)
+	cMode := C.CString(s.CurrentMode)
+	cModes := C.CString(cModesStr)
+	cCmds := C.CString(cCmdsStr)
 	defer func() {
 		C.free(unsafe.Pointer(cTitle))
 		C.free(unsafe.Pointer(cStatus))
 		C.free(unsafe.Pointer(cMode))
 		C.free(unsafe.Pointer(cModes))
+		C.free(unsafe.Pointer(cCmds))
 	}()
-	C.ssxngTrayRefresh(cTitle, cStatus, cMode, cModes, cBool(enabled))
+	C.ssxngTrayRefresh(cTitle, cStatus, cMode, cModes, cCmds, cBool(s.Enabled))
 }
 
 // Stop removes the icon.
@@ -175,5 +175,14 @@ func ssxngTrayEvent(kind C.int, mode *C.char) {
 		if t.menu.OnQuit != nil {
 			go t.menu.OnQuit()
 		}
+	case 5:
+		// AppKit already put the text on the pasteboard; this is the callback that
+		// lets the app log it and toast. Copy the string here, on this thread,
+		// because the C buffer dies with the menu item's autorelease pool.
+		if t.menu.OnCopy == nil {
+			return
+		}
+		cmd := C.GoString(mode)
+		go t.menu.OnCopy(cmd)
 	}
 }
