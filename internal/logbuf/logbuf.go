@@ -5,6 +5,7 @@ package logbuf
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +26,12 @@ type Buffer struct {
 	subs  map[int]chan Entry
 	next  int
 	seq   int64
+
+	// dropped counts entries a subscriber's channel was too full to accept. The
+	// subscription exists to push lines to the UI, and the UI is allowed to miss
+	// lines (it catches up with GetLogs); the ring and the log file are still
+	// complete. Counting it here keeps that loss visible instead of silent.
+	dropped atomic.Int64
 }
 
 // New creates a buffer holding at most limit lines.
@@ -35,16 +42,11 @@ func New(limit int) *Buffer {
 	return &Buffer{limit: limit, subs: make(map[int]chan Entry)}
 }
 
-// Add appends a line and notifies subscribers without blocking.
-func (b *Buffer) Add(level, scope, message string) {
-	b.AddEntry(level, scope, message)
-}
-
-// AddEntry is Add, but it also returns the stored entry. Callers that need the
-// sequence number or the normalised level (the app stamps it into its file log
-// and the event it pushes to the UI) would otherwise have to read the ring back
-// with Entries(1), taking the lock a second time and allocating a slice for
-// every single line.
+// AddEntry appends a line, notifies subscribers without blocking, and returns
+// the stored entry. Callers that need the sequence number or the normalised
+// level (the app stamps it into its file log and the batch it pushes to the UI)
+// would otherwise have to read the ring back with Entries(1), taking the lock a
+// second time and allocating a slice for every single line.
 func (b *Buffer) AddEntry(level, scope, message string) Entry {
 	level = strings.ToLower(strings.TrimSpace(level))
 	switch level {
@@ -61,20 +63,28 @@ func (b *Buffer) AddEntry(level, scope, message string) Entry {
 	if len(b.items) > b.limit {
 		b.items = b.items[len(b.items)-b.limit:]
 	}
-	subs := make([]chan Entry, 0, len(b.subs))
+	// Fan out while still holding the lock. The sends are non-blocking, so this
+	// cannot stall a proxy goroutine logging on its hot path, and it makes
+	// "cancel closes the channel" race-free: a subscriber is removed and closed
+	// under the same lock, so no send can ever target a closed channel.
 	for _, ch := range b.subs {
-		subs = append(subs, ch)
+		select {
+		case ch <- e:
+		default:
+			// A slow subscriber must never block the caller: proxy goroutines log
+			// on their hot path, and stalling there would stall traffic.
+			b.dropped.Add(1)
+		}
 	}
 	b.mu.Unlock()
 
-	for _, ch := range subs {
-		select {
-		case ch <- e:
-		default: // a slow subscriber must never block the caller
-		}
-	}
 	return e
 }
+
+// TakeDropped returns how many entries have been dropped since the previous
+// call and resets the counter, so a caller can report the loss without
+// repeating itself.
+func (b *Buffer) TakeDropped() int64 { return b.dropped.Swap(0) }
 
 // Entries returns up to limit of the most recent lines, oldest first.
 func (b *Buffer) Entries(limit int) []Entry {
@@ -110,6 +120,12 @@ func (b *Buffer) Clear() {
 }
 
 // Subscribe returns a channel of new entries and a function to unsubscribe.
+//
+// The channel is buffered and deliveries are non-blocking: a subscriber that
+// cannot keep up loses entries (counted by TakeDropped) rather than slowing the
+// producer down. Unsubscribing removes the subscriber and closes the channel
+// under the same lock AddEntry fans out with, so a caller may unsubscribe while
+// other goroutines are still logging.
 func (b *Buffer) Subscribe(capacity int) (<-chan Entry, func()) {
 	if capacity <= 0 {
 		capacity = 256
@@ -126,8 +142,8 @@ func (b *Buffer) Subscribe(capacity int) (<-chan Entry, func()) {
 		once.Do(func() {
 			b.mu.Lock()
 			delete(b.subs, id)
-			b.mu.Unlock()
 			close(ch)
+			b.mu.Unlock()
 		})
 	}
 }

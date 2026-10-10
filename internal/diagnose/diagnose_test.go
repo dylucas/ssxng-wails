@@ -41,6 +41,45 @@ func testContext(t *testing.T) Context {
 	}
 }
 
+// TestRunReportsLogFileWriteFailures pins the visibility requirement for the log
+// file: the logger cannot report its own failures (logging about the logger
+// recurses), so an unwritable file must show up as a warning here instead of
+// silently dropping every line.
+func TestRunReportsLogFileWriteFailures(t *testing.T) {
+	ctx := testContext(t)
+	ctx.LogWriteError = "no space left on device"
+	ctx.LogWriteFailures = 12
+
+	byName := map[string]Check{}
+	for _, c := range Run(ctx) {
+		byName[c.Name] = c
+	}
+	c, ok := byName["日志文件"]
+	if !ok {
+		t.Fatal("缺少“日志文件”检查项")
+	}
+	if c.Status != StatusWarn {
+		t.Errorf("写入失败时应为 warn，实际 %q", c.Status)
+	}
+	for _, want := range []string{"no space left on device", "12"} {
+		if !strings.Contains(c.Detail, want) {
+			t.Errorf("详情应包含 %q，实际 %q", want, c.Detail)
+		}
+	}
+	if c.Suggestion == "" {
+		t.Error("写入失败时应给出建议")
+	}
+
+	// Without a recorded failure the same context must stay informational.
+	ctx.LogWriteError = ""
+	ctx.LogWriteFailures = 0
+	for _, c := range Run(ctx) {
+		if c.Name == "日志文件" && c.Status != StatusInfo {
+			t.Errorf("无失败时应为 info，实际 %q (%s)", c.Status, c.Detail)
+		}
+	}
+}
+
 func TestRunProducesSensibleChecks(t *testing.T) {
 	ctx := testContext(t)
 	ctx.Helper = proxyconf.HelperStatusInfo{Installed: false, RequiredVersion: proxyconf.HelperVersion}

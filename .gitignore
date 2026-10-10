@@ -19,6 +19,9 @@ internal/helperbin/bin/ssxng-helper
 # 在 git status 里制造上万条噪声，把真正的改动埋掉。
 .cache/
 .gocache/
+# `make test-race` 的独立构建缓存：默认缓存里一旦留下失效的 race 产物，
+# `go test -race` 就会报 "runtime/race: package testmain: cannot find package"。
+.gocache-race/
 .gotmp/
 coverage.out
 *.test

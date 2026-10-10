@@ -1,4 +1,4 @@
-# SSXNG 前端契约（冻结版 v1）
+# SSXNG 前端契约（冻结版 v2）
 
 Wails v2 + plain 模板。**没有打包器、没有 npm、没有网络请求**：`frontend/src` 由 Go 直接 `//go:embed`，
 Wails 的 asset server 把它挂在 `/`（`index.html` → `/`，`main.css` → `/main.css`）。
@@ -16,13 +16,27 @@ await window.go.main.App.SetMode('global');
 
 ```js
 window.runtime.EventsOn('ssxng:state',   (state)  => { /* api.State */ });
-window.runtime.EventsOn('ssxng:log',     (entry)  => { /* api.LogEntry */ });
+window.runtime.EventsOn('ssxng:logs',    (entries)=> { /* api.LogEntry[] */ });
 window.runtime.EventsOn('ssxng:traffic', (traffic)=> { /* api.Traffic */ });
 window.runtime.EventsOn('ssxng:toast',   (toast)  => { /* {level, message} */ });
 ```
 
 `ssxng:state` 在启动时以及任何状态变化后触发（这是 UI 的唯一真相来源，收到就整页重渲染）。
 `ssxng:traffic` 每秒一次。
+
+`ssxng:logs` 是**成批**推送的：后端把日志行合并到约 100ms 一个批次里（单批最多 256 条），
+而不是每写一行就发一次事件。代理每建立一条连接都会写日志，逐条推送等于每条连接一次
+JSON 序列化 + 一次 IPC，所以这里换成了批量。
+
+由此产生两条前端的硬性约定：
+
+1. **必须按 `seq` 去重**，不能假设"每批都是新的、有序的"。批次内部混有重复行或迟到的旧行
+   时，水位线（`App.logSeq`）要能挡住它们；`seq <= logSeq` 的行一律丢弃。
+2. **必须容忍缺行**。订阅缓冲（1024 条）满时后端会丢弃推送，但环形缓冲与日志文件仍是完整的，
+   `GetLogs(afterSeq)` 就是补齐手段：切到日志页、改日志等级过滤时都要带水位线拉一次增量。
+
+> v1 → v2：`ssxng:log`（单条）被 `ssxng:logs`（批量）取代。前后端在同一个二进制里一起发布，
+> 没有需要兼容的旧前端。
 
 ## 3. 方法签名
 
@@ -38,7 +52,7 @@ window.runtime.EventsOn('ssxng:toast',   (toast)  => { /* {level, message} */ })
 | `MoveServer(id, delta)` | string, number | – |
 | `ImportSSURL(raw)` | string | `ServerView` |
 | `ExportSSURL(id)` | string | string |
-| `GetLogs(afterSeq)` | number | `LogEntry[]`（`afterSeq<=0` 时返回最近 500 条） |
+| `GetLogs(afterSeq)` | number | `LogEntry[]`（`afterSeq<=0` 时返回最近 500 条；否则只返回 `seq > afterSeq` 的行，用于补齐被丢弃的批次） |
 | `ClearLogs()` | – | – |
 | `ListNetworkServices()` | – | `NetworkService[]` |
 | `InstallHelper()` | – | – （会弹出 macOS 管理员授权对话框，耗时几秒到几十秒） |
@@ -99,7 +113,8 @@ SettingsView = {
    本地端口一览（SOCKS/HTTP/PAC，带 `active` 指示；UDP 与 SOCKS 共端口，所以在 SOCKS
    那一项后面追加一个 `UDP` 标记而不是单独占一项——状态页"关键事实"一行固定 4 项，
    多一项就会换行）、助手状态卡片（未安装时给"安装助手"按钮）。
-   最近连接明细暂无独立视图：连接历史只用于日志区展示 `ssxng:log` 里的 `proxy` 记录。
+   最近连接明细暂无独立视图：连接历史只用于日志区展示 `ssxng:logs` 里的 `proxy` 记录
+   （状态页的"最近连接"卡片按 ~250ms 节流重建，避免成批到达时反复重排 DOM）。
 2. **服务器**：列表（标题、host:port、method、当前选中打勾），支持新增/编辑/删除/上移下移/选中；
    编辑表单字段：备注、地址、端口、加密方式（下拉，来自 `SupportedMethods`，见 Go
    `internal/config/servers.go`：aes-128-gcm / aes-192-gcm / aes-256-gcm /
@@ -139,6 +154,10 @@ SettingsView = {
 - 跨文件引用规则：只能解构**在它之前加载**的文件导出的名字
   （`const {call, App} = S;`）；要引用后面文件里的东西必须写 `S.name(...)`。
   违反这条会在启动时静默拿到 `undefined`，`scripts/ui-check/measure.js` 里有静态断言拦住它。
+- **交互**：左侧标签切换视图时，每个视图各自的 `.main` 滚动位置会被记住并恢复
+  （`App.scroll`，不持久化）；日志页仍按既有语义进入即置底。服务器行的"更多"菜单必须能用键盘走完：
+  打开后焦点进入第一个**可用**菜单项，↑/↓ 循环、Home/End 到首尾，Escape 收起并把焦点还给触发按钮，
+  Tab 收起后按默认行为继续。菜单项为禁用态时方向键不得停在它上面。
 
 ## 7. 文件交付清单（只允许改这些）
 

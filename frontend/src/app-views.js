@@ -23,7 +23,7 @@
         if (App.eventsBound) return 4;
         let n = 0;
         if (onEvent('ssxng:state', onStateEvent)) n++;
-        if (onEvent('ssxng:log', onLogEvent)) n++;
+        if (onEvent('ssxng:logs', onLogsEvent)) n++;
         if (onEvent('ssxng:traffic', onTrafficEvent)) n++;
         if (onEvent('ssxng:toast', onToastEvent)) n++;
         App.eventsBound = n > 0;
@@ -42,8 +42,9 @@
         renderTraffic();
     }
 
-    function onLogEvent(raw) {
-        pushLog(logEntry(raw));
+    function onLogsEvent(raw) {
+        // 后端按 ~100ms 批量推送；这里仍然逐条按 seq 去重，顺序/重复与单条推送一致。
+        pushLogs(arr(raw).map(logEntry));
     }
 
     function onToastEvent(raw) {
@@ -54,6 +55,8 @@
     function applyState(raw) {
         const next = normalizeState(raw);
         App.state = next;
+        // 服务器列表（可能含密码）换了，抹除缓存的密码集合跟着失效。
+        S.invalidateSecretCache();
         if (!App.dirty) App.draft = cloneSettings(next.settings);
         renderBackendBanner();
         renderView(!viewHasFocus(App.view));
@@ -75,15 +78,39 @@
     function setView(name) {
         App.menu = null;
         if (VIEWS.indexOf(name) < 0) return;
+        // 记住离开时的滚动位置：.main 是全页唯一的滚动容器，不记录的话切回来
+        // 会停在别的视图留下的偏移处。
+        saveScroll(App.view);
         App.view = name;
         renderSidebar();
         renderView(true);
+        restoreScroll(name);
         if (name === 'modes') detach(S.loadServices(false));
         if (name === 'logs') {
             App.follow = true;
             const list = document.getElementById('log-list');
             if (list) list.scrollTop = list.scrollHeight;
+            App.logScroll = list ? list.scrollTop : 0;
+            // 事件是成批推送的：切进来时按水位线补一次，落后/丢弃的行在这里补齐。
+            detach(S.refreshLogs());
         }
+    }
+
+    // 每个视图各自记住 .main 的滚动位置。不做持久化，跨会话不需要。
+    function mainEl() { return document.querySelector('.main'); }
+
+    function saveScroll(name) {
+        const el = mainEl();
+        if (!el || !name) return;
+        if (!App.scroll) App.scroll = {};
+        App.scroll[name] = el.scrollTop;
+    }
+
+    function restoreScroll(name) {
+        const el = mainEl();
+        if (!el) return;
+        const top = (App.scroll && App.scroll[name]) || 0;
+        el.scrollTop = top;
     }
 
     function renderView(force) {
@@ -241,8 +268,30 @@
         return '<div class="list is-tight">' + rows.map((e) =>
             '<div class="row"><div class="row-text">' +
             '<div class="row-title"><span class="mono muted">' + esc(fmtClock(e.time)) + '</span></div>' +
-            '<div class="row-sub">' + esc(scrub(e.message)) + '</div>' +
+            '<div class="row-sub">' + esc(entryText(e)) + '</div>' +
             '</div></div>').join('') + '</div>';
+    }
+
+    // 状态页的"最近连接"原本每来一条 proxy 日志就整块重建。日志现在是成批推送的，
+    // 一批可能有几百条，逐条重建既浪费又会丢中间帧；合并到 250ms 一次即可，
+    // 数据本身不丢（App.logs 是真相来源，整页重绘时照样是最新的 6 条）。
+    const RECENT_PROXY_MS = 250;
+    let recentProxyTimer = 0;
+
+    function scheduleRecentProxy() {
+        if (recentProxyTimer) return;
+        recentProxyTimer = window.setTimeout(() => {
+            recentProxyTimer = 0;
+            const box = document.getElementById('recent-proxy');
+            if (box) box.innerHTML = recentProxyHtml();
+        }, RECENT_PROXY_MS);
+    }
+
+    function cancelRecentProxy() {
+        if (recentProxyTimer) {
+            window.clearTimeout(recentProxyTimer);
+            recentProxyTimer = 0;
+        }
     }
 
     function helperHtml(h, s) {
@@ -287,6 +336,8 @@
     function renderStatus() {
         const body = document.getElementById('body-status');
         if (!body) return;
+        // 整页重建会把最近连接一起写出来，挂起的节流更新就没必要了。
+        cancelRecentProxy();
         const s = state();
         const sv = s.server;
         const t = s.traffic;
@@ -638,11 +689,18 @@
         h.push('</div>');
         h.push('<div class="form-errors" id="settings-errors"></div>');
 
-        // 当前生效的模式。放在这里而不是状态页：状态页负责"看"，
-        // 模式与代理页负责"配"，切换模式走这里或菜单栏图标。
+        // 当前生效的模式 + "菜单栏可切换的模式"。两者都是"模式"这一个主题，
+        // 合并成一张卡：少一个卡片标题、少一次卡片间距（页高有硬门槛）。
         h.push('<section class="card"><h2 class="card-title">' + esc(T.status.mode) + '</h2>' +
             '<div class="mode-list">' + MODES.map((m) => modeRadioHtml(state(), m)).join('') + '</div>' +
-            '<p class="hint">' + esc(T.modes.activeHint) + '</p></section>');
+            '<p class="hint">' + esc(T.modes.activeHint) + '</p>' +
+            '<h3 class="card-sub-title">' + esc(T.modes.switchModes) + '</h3>' +
+            '<div class="check-list is-2col">' +
+            checkFieldHtml('enablePAC', T.modes.enablePAC) +
+            checkFieldHtml('enableGlobal', T.modes.enableGlobal) +
+            checkFieldHtml('enableManual', T.modes.enableManual) +
+            checkFieldHtml('enableExternalPAC', T.modes.enableExternalPAC) +
+            '</div></section>');
 
         h.push('<section class="card"><h2 class="card-title">' + esc(T.modes.listen) + '</h2><div class="form-grid">');
         h.push(fieldHtml('socksAddress', T.modes.socksAddress, {mono: true}));
@@ -662,14 +720,6 @@
         h.push('</div>');
         h.push(cliProxyHtml());
         h.push('</section>');
-
-        h.push('<section class="card"><h2 class="card-title">' + esc(T.modes.switchModes) + '</h2>' +
-            '<div class="check-list">' +
-            checkFieldHtml('enablePAC', T.modes.enablePAC) +
-            checkFieldHtml('enableGlobal', T.modes.enableGlobal) +
-            checkFieldHtml('enableManual', T.modes.enableManual) +
-            checkFieldHtml('enableExternalPAC', T.modes.enableExternalPAC) +
-            '</div></section>');
 
         h.push(servicesHtml());
 
@@ -757,7 +807,7 @@
             '<span class="log-time">' + esc(fmtClock(e.time)) + '</span>' +
             '<span class="log-level">' + esc(str(e.level).toUpperCase()) + '</span>' +
             '<span class="log-scope">' + esc(e.scope) + '</span>' +
-            '<span class="log-msg">' + esc(scrub(e.message)) + '</span></div>';
+            '<span class="log-msg">' + esc(entryText(e)) + '</span></div>';
     }
 
     function logFilterHtml() {
@@ -803,24 +853,35 @@
         }
     }
 
-    function pushLog(e) {
-        if (!e || (!e.message && !e.scope)) return;
-        // Dedup on the sequence number. The backend numbers every line, so a
-        // watermark answers "have I seen this?" in O(1); the old linear scan was
-        // O(n) per line, i.e. O(n²) over a session's worth of logs.
-        if (e.seq > 0) {
-            if (e.seq <= App.logSeq) return;
-            App.logSeq = e.seq;
-        }
-        App.logs.push(e);
-        if (App.logs.length > LOG_LIMIT) App.logs.splice(0, App.logs.length - LOG_LIMIT);
-
-        if (App.view === 'logs' && !viewHasFocus('logs')) appendLogRow(e);
-        if (App.view === 'status' && e.scope === 'proxy') {
-            const box = document.getElementById('recent-proxy');
-            if (box) box.innerHTML = recentProxyHtml();
-        }
+    // 抹除结果在条目入队时算一次，之后每次重绘直接复用：日志页一屏 500 行，
+    // 逐行重新扫一遍全部密码是纯浪费。密码集合变化时由 invalidateSecretCache()
+    // 清掉 e.clean，这里会重算。
+    function entryText(e) {
+        if (typeof e.clean !== 'string') e.clean = scrub(e.message);
+        return e.clean;
     }
+
+    // 批量版：一批里的每一条都走同样的水位线去重，语义与逐条推送完全一致。
+    function pushLogs(list) {
+        let touched = false;
+        let proxyTouched = false;
+        list.forEach((e) => {
+            if (!e || (!e.message && !e.scope)) return;
+            if (e.seq > 0) {
+                if (e.seq <= App.logSeq) return;
+                App.logSeq = e.seq;
+            }
+            App.logs.push(e);
+            touched = true;
+            if (e.scope === 'proxy') proxyTouched = true;
+            if (App.view === 'logs' && !viewHasFocus('logs')) appendLogRow(e);
+        });
+        if (!touched) return;
+        if (App.logs.length > LOG_LIMIT) App.logs.splice(0, App.logs.length - LOG_LIMIT);
+        if (proxyTouched && App.view === 'status') scheduleRecentProxy();
+    }
+
+    function pushLog(e) { pushLogs([e]); }
 
     function appendLogRow(e) {
         const list = document.getElementById('log-list');
@@ -894,7 +955,7 @@
 
     /* 对后面加载的脚本公开的接口 */
     Object.assign(S, {
-        applyState, bindEvents, cliProxyCommands, refreshEditorFeedback, renderSidebar,
-        renderView, setView
+        applyState, bindEvents, cancelRecentProxy, cliProxyCommands, entryText,
+        pushLog, pushLogs, refreshEditorFeedback, renderSidebar, renderView, setView
     });
 })();

@@ -12,7 +12,7 @@
     if (!S) return;
 
     // 从先加载的文件里取需要的名字。
-    const {$, ACTIONS, App, applyI18n, bindEvents, detach, errText, hasBackend, loadLogs,
+    const {$, $$, ACTIONS, App, applyI18n, bindEvents, detach, errText, hasBackend, loadLogs,
         markBackendDown, pkey, refreshState, renderBackendBanner, renderSidebar,
         renderView, str, toast, updateDraftField, updateEditorField, updateServiceToggle} = S;
 
@@ -63,7 +63,13 @@
         if (fieldEventKind(el) !== kind) return;
         const ds = el.dataset;
         if (ds.ui === 'importRaw') { App.importRaw = el.value; return; }
-        if (ds.ui === 'logLevel') { App.logLevel = str(el.value) || 'all'; renderView(true); return; }
+        if (ds.ui === 'logLevel') {
+            App.logLevel = str(el.value) || 'all';
+            renderView(true);
+            // 换了过滤条件就顺便补一次增量，避免把"被过滤掉"和"没收到"混为一谈。
+            detach(S.refreshLogs());
+            return;
+        }
         if (ds.ed) { updateEditorField(el); return; }
         if (ds.svc) { updateServiceToggle(el); return; }
         if (ds.key) updateDraftField(el);
@@ -72,13 +78,55 @@
     function onInput(e) { onFieldEvent(e, 'input'); }
     function onChange(e) { onFieldEvent(e, 'change'); }
 
+    // 行内"更多"菜单的键盘导航：菜单项可以点，也必须能用键盘走完。
+    // 只在菜单打开时接管这几个键，其余情况一律放行。
+    function menuItems() {
+        return $$('.menu [data-act]:not([disabled])');
+    }
+
+    function focusMenuButton() {
+        const btn = $('[data-act="row-more"][data-id="' + App.menuId + '"]');
+        if (btn) btn.focus();
+    }
+
+    // 收起菜单并把焦点还给触发按钮。Tab 也走这里（不 preventDefault），
+    // 否则焦点会穿到菜单背后的页面里。
+    function closeMenuByKeyboard() {
+        App.menu = null;
+        renderView(true);
+        focusMenuButton();
+    }
+
     function onKeydown(e) {
-        if (e.key === 'Escape' && App.menu) {
-            e.preventDefault();
-            closeMenu();
-            const btn = $('[data-act="row-more"][data-id="' + App.menuId + '"]');
-            if (btn) btn.focus();
-            return;
+        if (App.menu) {
+            const items = menuItems();
+            const idx = items.indexOf(document.activeElement);
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeMenuByKeyboard();
+                return;
+            }
+            if (e.key === 'Tab') {
+                closeMenuByKeyboard();
+                return;
+            }
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (!items.length) return;
+                // 焦点不在菜单里（例如仍停在触发按钮上）时，向下进入第一项。
+                const step = e.key === 'ArrowDown' ? 1 : -1;
+                const next = idx < 0
+                    ? (step > 0 ? 0 : items.length - 1)
+                    : (idx + step + items.length) % items.length;
+                items[next].focus();
+                return;
+            }
+            if (e.key === 'Home' || e.key === 'End') {
+                e.preventDefault();
+                if (!items.length) return;
+                items[e.key === 'Home' ? 0 : items.length - 1].focus();
+                return;
+            }
         }
         if (e.key !== 'Enter') return;
         const el = e.target;

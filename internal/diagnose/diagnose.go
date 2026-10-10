@@ -49,7 +49,11 @@ type Context struct {
 	GFWListFile   string
 	UserRuleFile  string
 	LogFile       string
-	Version       string
+	// LogWriteError is the most recent failure writing the log file, and
+	// LogWriteFailures how many times it has failed. Empty means "no trouble".
+	LogWriteError    string
+	LogWriteFailures int64
+	Version          string
 }
 
 // Run performs the static checks.
@@ -208,8 +212,18 @@ func Run(c Context) []Check {
 	// --- environment ----------------------------------------------------------
 	add("运行环境", StatusInfo,
 		fmt.Sprintf("SSXNG %s，%s %s/%s，%s", c.Version, runtime.Version(), runtime.GOOS, runtime.GOARCH, runtime.Version()), "")
-	if size, err := fileSize(c.LogFile); err == nil {
-		add("日志文件", StatusInfo, fmt.Sprintf("%s（%s）", c.LogFile, humanBytes(size)), "")
+	// The log file is written from a path that cannot report its own failures
+	// (logging about the logger would recurse), so an unwritable file used to be
+	// completely silent. Surface it here instead.
+	switch {
+	case c.LogWriteError != "":
+		add("日志文件", StatusWarn,
+			fmt.Sprintf("无法写入 %s：%s（已失败 %d 次）", c.LogFile, c.LogWriteError, c.LogWriteFailures),
+			"检查磁盘空间与目录权限；界面内的日志不受影响")
+	default:
+		if size, err := fileSize(c.LogFile); err == nil {
+			add("日志文件", StatusInfo, fmt.Sprintf("%s（%s）", c.LogFile, humanBytes(size)), "")
+		}
 	}
 	return checks
 }

@@ -66,6 +66,7 @@
         logs: [],             // LogEntry[]，最多 LOG_LIMIT 条（客户端镜像）
         logSeq: 0,            // 已见过的最大 seq：日志去重的水位线
         logScroll: 0,         // 日志列表的滚动位置，重渲染后按需还原
+        scroll: {},           // 每个视图各自的主区滚动位置：view -> scrollTop
         logLevel: 'all',
         follow: true,
         services: [],         // NetworkService[]
@@ -222,11 +223,37 @@
         return out.filter((x) => typeof x === 'string' && x.length >= 3);
     }
 
+    // 抹除已知密码的正则只建一次：原先每个密码各做一遍 indexOf + split/join，
+    // 日志页 500 行 × N 个节点就是上万次字符串操作。合并成一个交替正则后
+    // 一次 replace 处理完，密码集合变化时用 invalidateSecretCache() 失效。
+    let secretRe = null;
+
+    function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+    function buildSecretRe() {
+        const list = secrets();
+        if (!list.length) return null;
+        // 长的排前面：否则短密码会先把长密码的前缀替掉（"abc" 命中 "abcd" 后留下 "d"）。
+        const ordered = list.slice().sort((a, b) => b.length - a.length);
+        try {
+            return new RegExp(ordered.map(escapeRe).join('|'), 'g');
+        } catch (err) {
+            return null; // 理论上不会发生（已转义），退回不抹除也好过抛异常
+        }
+    }
+
+    // 密码集合变了就丢弃正则，并清掉日志条目上缓存的抹除结果，让它们重算一次。
+    function invalidateSecretCache() {
+        secretRe = null;
+        arr(App.logs).forEach((e) => { if (e) delete e.clean; });
+    }
+
     // 纵深防御：任何进入界面/日志的文本都先抹掉已知密码。
     function scrub(text) {
-        let s = str(text);
-        secrets().forEach((sec) => { if (s.indexOf(sec) >= 0) s = s.split(sec).join('••••••'); });
-        return s;
+        const s = str(text);
+        if (!s) return s;
+        if (secretRe === null) secretRe = buildSecretRe();
+        return secretRe ? s.replace(secretRe, '••••••') : s;
     }
 
     function toast(level, message) {
@@ -563,7 +590,8 @@
         $, $$, App, DEFAULT_GFWLIST_URL, LOG_LIMIT, METHODS, MIRROR_GFWLIST_URL, MODES, T, VIEWS,
         applyI18n, arr, busyAttrs, busyLabel, call, checkView, cloneSettings, copyText, detach,
         emptyServer, ensureDraft, errText, esc, fill, findServer, fmtBytes, fmtClock,
-        fmtDateTime, fmtDuration, fmtSpeed, hasBackend, helperView, icon, isLoopback, logEntry,
+        fmtDateTime, fmtDuration, fmtSpeed, hasBackend, helperView, icon, invalidateSecretCache,
+        isLoopback, logEntry,
         markBackendDown, markBackendUp, networkServiceView, normalizeState, num, obj, onEvent,
         pacView, pkey, refreshState, renderBackendBanner, scrub, selfTestView, serverView, state,
         str, toast, trafficView, viewHasFocus

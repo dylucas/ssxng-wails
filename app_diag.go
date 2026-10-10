@@ -128,6 +128,7 @@ func (a *App) Diagnose() []api.Check {
 
 func (a *App) diagnoseContext() diagnose.Context {
 	sett := a.settings()
+	_, logFailures, logErr := a.logFile.Status()
 	dctx := diagnose.Context{
 		ConfigDir:     a.store.Dir(),
 		Settings:      sett,
@@ -143,7 +144,11 @@ func (a *App) diagnoseContext() diagnose.Context {
 		GFWListFile:   a.store.GFWListPath(),
 		UserRuleFile:  a.store.UserRulePath(),
 		LogFile:       a.store.LogFilePath(),
-		Version:       AppVersion,
+		// Reported next to the path so an unwritable file is visible instead of
+		// silently dropping every line.
+		LogWriteError:    logErr,
+		LogWriteFailures: logFailures,
+		Version:          AppVersion,
 	}
 	if cur, ok := a.store.CurrentServer(); ok {
 		dctx.CurrentServer = &cur

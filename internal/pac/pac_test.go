@@ -127,9 +127,11 @@ func TestGenerate(t *testing.T) {
 	if got := RuleCountFromPAC(res.Content); got != res.RuleCount {
 		t.Errorf("PAC 内规则数不一致: %d != %d", got, res.RuleCount)
 	}
-	host, port, ok := PACHostPort(res.Content)
-	if !ok || host != "127.0.0.1" || port != 1086 {
-		t.Errorf("PAC 端点解析错误: %s:%d ok=%v", host, port, ok)
+	// The generated file must name the local SOCKS5 endpoint the client is
+	// listening on; line 118 pins the full proxy line, this keeps the endpoint
+	// itself asserted independently of the surrounding syntax.
+	if !strings.Contains(js, "SOCKS5 127.0.0.1:1086") {
+		t.Errorf("PAC 文件没有指向本地 SOCKS5 端点:\n%s", firstProxyLine(js))
 	}
 	// The rules array must be valid JSON so that browsers can parse the file.
 	var rules []string

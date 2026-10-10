@@ -10,8 +10,8 @@ func TestAddAndEntries(t *testing.T) {
 	if b.Len() != 0 {
 		t.Fatalf("新建缓冲应为空，实际 %d", b.Len())
 	}
-	b.Add("info", "app", "第一条")
-	b.Add("error", "proxy", "第二条")
+	b.AddEntry("info", "app", "第一条")
+	b.AddEntry("error", "proxy", "第二条")
 
 	entries := b.Entries(10)
 	if len(entries) != 2 {
@@ -37,8 +37,8 @@ func TestAddAndEntries(t *testing.T) {
 
 // TestAddEntryMatchesTheStoredLine pins the contract app.logf relies on: the
 // entry handed back is exactly the one that landed in the ring (same sequence
-// number, same normalised level), so the file log and the ssxng:log event can
-// never drift from what GetLogs returns.
+// number, same normalised level), so the file log and the batched ssxng:logs
+// event can never drift from what GetLogs returns.
 func TestAddEntryMatchesTheStoredLine(t *testing.T) {
 	b := New(10)
 	// "WARNING" is not a level we accept; the buffer must normalise it, and the
@@ -64,11 +64,10 @@ func TestAddEntryMatchesTheStoredLine(t *testing.T) {
 		t.Error("返回的条目应带时间戳")
 	}
 
-	// Add still behaves as before: it writes the same line and discards it.
-	b.Add("error", "pac", "second")
+	b.AddEntry("error", "pac", "second")
 	all := b.Entries(10)
 	if len(all) != 2 || all[1].Message != "second" || all[1].Level != "error" {
-		t.Fatalf("Add 写入的内容不对: %+v", all)
+		t.Fatalf("写入的内容不对: %+v", all)
 	}
 }
 
@@ -91,7 +90,7 @@ func TestAddEntryKeepsSequenceMonotonic(t *testing.T) {
 	}
 }
 
-// TestAddEntryNotifiesSubscribers checks Add still fans out after the split.
+// TestAddEntryNotifiesSubscribers checks AddEntry still fans out to subscribers.
 func TestAddEntryNotifiesSubscribers(t *testing.T) {
 	b := New(10)
 	ch, cancel := b.Subscribe(4)
@@ -111,7 +110,7 @@ func TestAddEntryNotifiesSubscribers(t *testing.T) {
 func TestRingDropsOldest(t *testing.T) {
 	b := New(3)
 	for i := 0; i < 10; i++ {
-		b.Add("info", "s", string(rune('a'+i)))
+		b.AddEntry("info", "s", string(rune('a'+i)))
 	}
 	entries := b.Entries(10)
 	if len(entries) != 3 {
@@ -128,7 +127,7 @@ func TestRingDropsOldest(t *testing.T) {
 func TestEntriesLimit(t *testing.T) {
 	b := New(50)
 	for i := 0; i < 20; i++ {
-		b.Add("info", "s", "x")
+		b.AddEntry("info", "s", "x")
 	}
 	if n := len(b.Entries(5)); n != 5 {
 		t.Errorf("limit=5 应返回 5 条，实际 %d", n)
@@ -146,13 +145,13 @@ func TestEntriesLimit(t *testing.T) {
 
 func TestClearKeepsSequenceMonotonic(t *testing.T) {
 	b := New(10)
-	b.Add("info", "s", "a")
+	b.AddEntry("info", "s", "a")
 	before := b.LastSeq()
 	b.Clear()
 	if b.Len() != 0 {
 		t.Fatalf("清空后应为空，实际 %d", b.Len())
 	}
-	b.Add("info", "s", "b")
+	b.AddEntry("info", "s", "b")
 	if b.LastSeq() <= before {
 		t.Errorf("清空后序号仍应递增: %d -> %d", before, b.LastSeq())
 	}
@@ -168,7 +167,7 @@ func TestSubscribeReceivesAndUnsubscribes(t *testing.T) {
 	ch, cancel := b.Subscribe(4)
 	defer cancel()
 
-	b.Add("info", "s", "hello")
+	b.AddEntry("info", "s", "hello")
 	select {
 	case e := <-ch:
 		if e.Message != "hello" {
@@ -181,11 +180,11 @@ func TestSubscribeReceivesAndUnsubscribes(t *testing.T) {
 	// A slow subscriber must not block the producer: the channel is buffered and
 	// drops instead of stalling the proxy.
 	for i := 0; i < 20; i++ {
-		b.Add("info", "s", "flood")
+		b.AddEntry("info", "s", "flood")
 	}
 
 	cancel()
-	b.Add("info", "s", "after cancel")
+	b.AddEntry("info", "s", "after cancel")
 	select {
 	case <-ch:
 	case <-time.After(100 * time.Millisecond):
@@ -195,8 +194,45 @@ func TestSubscribeReceivesAndUnsubscribes(t *testing.T) {
 
 func TestNewWithNonPositiveLimitStillWorks(t *testing.T) {
 	b := New(0)
-	b.Add("info", "s", "x")
+	b.AddEntry("info", "s", "x")
 	if b.Len() > 1 {
 		t.Errorf("上限为 0 时不应堆积: %d", b.Len())
+	}
+}
+
+// TestTakeDroppedCountsLostSubscriberDeliveries pins the other half of the
+// "a slow subscriber must not block the producer" bargain: what the subscriber
+// misses has to be countable, otherwise the app cannot tell the user that the
+// log view fell behind (the ring and the log file are still complete).
+func TestTakeDroppedCountsLostSubscriberDeliveries(t *testing.T) {
+	b := New(100)
+	ch, cancel := b.Subscribe(2)
+	defer cancel()
+
+	if got := b.TakeDropped(); got != 0 {
+		t.Fatalf("初始不应有丢弃，实际 %d", got)
+	}
+	// The channel holds 2; the ring holds 5, so 3 deliveries cannot be queued.
+	for i := 0; i < 5; i++ {
+		b.AddEntry("info", "s", "x")
+	}
+	if got := b.TakeDropped(); got != 3 {
+		t.Errorf("应记录 3 条被丢弃的推送，实际 %d", got)
+	}
+	// Taking the counter resets it: the caller reports each loss exactly once.
+	if got := b.TakeDropped(); got != 0 {
+		t.Errorf("读取后应清零，实际 %d", got)
+	}
+	// Draining the channel makes room again, so nothing more is lost.
+	for i := 0; i < 2; i++ {
+		<-ch
+	}
+	b.AddEntry("info", "s", "y")
+	if got := b.TakeDropped(); got != 0 {
+		t.Errorf("通道腾空后不应再丢弃，实际 %d", got)
+	}
+	// The ring still holds every line regardless of what the subscriber saw.
+	if got := b.Len(); got != 6 {
+		t.Errorf("环形缓冲应保留全部 6 条，实际 %d", got)
 	}
 }

@@ -98,7 +98,12 @@
         main: {
             App: {
                 GetState: respond(state),
-                GetLogs: respond(logs),
+                // afterSeq 走真实语义：0 表示"最近 500 条"，否则只给水位线之后的。
+                // 界面靠它补齐被丢弃的批次，桩里必须一样，否则这条路径不会被覆盖。
+                GetLogs: function (afterSeq) {
+                    const seq = Number(afterSeq) || 0;
+                    return Promise.resolve(logs.filter(function (e) { return !seq || e.seq > seq; }));
+                },
                 ClearLogs: respond(null),
                 ListNetworkServices: respond(services),
                 HelperStatus: respond(state.helper),
@@ -216,12 +221,28 @@
         return true;
     };
 
-    // 走真实的 ssxng:log 事件路径推送一条日志。日志去重、水位线和滚动位置
-    // 都只有在这个路径上才看得出来，直接改 fixture 是观察不到的。
+    // 走真实的 ssxng:logs 事件路径推送一批日志。日志去重、水位线、滚动位置和
+    // 状态页"最近连接"的节流，只有在这个路径上才看得出来，直接改 fixture 是观察不到的。
+    window.__UI_PUSH_LOGS = function (entries) {
+        const list = (Array.isArray(entries) ? entries : [entries]).map(function (entry) {
+            return Object.assign({seq: 0, time: 1770000000, level: 'info', scope: 'app', message: 'x'}, entry);
+        });
+        (listeners['ssxng:logs'] || []).forEach(function (cb) { cb(list); });
+        return list.length;
+    };
+
+    // 单条推送：就是只有一个元素的批次，走的是同一条路径。
     window.__UI_PUSH_LOG = function (entry) {
+        return window.__UI_PUSH_LOGS([entry]);
+    };
+
+    // 只写进"后端"的日志里，不推事件：模拟一次被丢弃的批次（订阅缓冲满时后端
+    // 就是只丢推送、环形缓冲照写）。界面唯一的补齐手段是带 afterSeq 的 GetLogs，
+    // 切到日志页时会走一次，这个方法就是用来验证那条路径的。
+    window.__UI_BACKEND_LOG = function (entry) {
         const e = Object.assign({seq: 0, time: 1770000000, level: 'info', scope: 'app', message: 'x'}, entry);
-        (listeners['ssxng:log'] || []).forEach(function (cb) { cb(e); });
-        return true;
+        logs.push(e);
+        return logs.length;
     };
 
     // 读取界面当前镜像的日志状态（条数 + 去重水位线），供 ui-check 断言。

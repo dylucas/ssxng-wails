@@ -32,7 +32,7 @@ const AppVersion = "1.0.0"
 // Event names the frontend subscribes to (see docs/API.md).
 const (
 	EventState   = "ssxng:state"
-	EventLog     = "ssxng:log"
+	EventLogs    = "ssxng:logs"
 	EventTraffic = "ssxng:traffic"
 	EventToast   = "ssxng:toast"
 )
@@ -76,6 +76,12 @@ type App struct {
 
 	quitting atomic.Bool
 	tray     *tray.Tray
+
+	// logCh receives every line appended to logs; logPump batches it into
+	// EventLogs. logCancel unsubscribes at shutdown. lastLogDrop is the UnixNano
+	// of the last "the UI log fell behind" warning, used to rate limit it.
+	logCancel   func()
+	lastLogDrop atomic.Int64
 
 	stopLoops chan struct{}
 	loops     sync.WaitGroup
@@ -178,6 +184,10 @@ func (a *App) shutdown(ctx context.Context) {
 		a.stopLoops = nil
 	}
 	a.loops.Wait()
+	if a.logCancel != nil {
+		a.logCancel()
+		a.logCancel = nil
+	}
 
 	if a.applier != nil && a.store != nil {
 		if a.settings().ClearProxyOnQuit {
@@ -219,7 +229,14 @@ func (a *App) fatal(message string) {
 
 // ---------------------------------------------------------------- logging
 
-// logf records a line in the in-app log, the log file and the frontend.
+// logf records a line in the in-app log and the log file.
+//
+// It deliberately does *not* talk to the frontend: a proxy serving one page
+// logs an info line per connection and a debug line when each one ends, so a
+// per-line EventsEmit meant a JSON serialisation and an IPC message per
+// connection event. Lines reach the UI through startLogPump instead, which
+// batches them; GetLogs still returns the ring verbatim, so nothing is lost if
+// a batch is dropped.
 func (a *App) logf(level, scope, format string, args ...any) {
 	msg := format
 	if len(args) > 0 {
@@ -227,15 +244,14 @@ func (a *App) logf(level, scope, format string, args ...any) {
 	}
 	var entry logbuf.Entry
 	if a.logs != nil {
+		// AddEntry hands the same entry to the pump's subscription, so the file
+		// log and the UI batch can never disagree about the sequence number.
 		entry = a.logs.AddEntry(level, scope, msg)
 	} else {
 		entry = logbuf.Entry{Time: time.Now(), Level: level, Scope: scope, Message: msg}
 	}
 	if a.logFile != nil {
 		a.logFile.Write(entry)
-	}
-	if a.ctx != nil {
-		wruntime.EventsEmit(a.ctx, EventLog, a.toLogEntry(entry))
 	}
 }
 
@@ -401,6 +417,8 @@ func (a *App) startLoops() {
 	}
 	stop := make(chan struct{})
 	a.stopLoops = stop
+
+	a.startLogPump(stop)
 
 	a.loops.Add(2)
 	go func() {

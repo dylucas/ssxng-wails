@@ -555,13 +555,12 @@ async function main() {
         }), '状态页没有宽度异常的卡片');
 
         const modesPage = await measure(980, 680, 'dark', 'modes');
-        // 门槛从 1275 提到 1450：本轮在"本地监听"卡里新增了"命令行代理"块（约 160px）。
-        // 后来同一张卡又加了"启用 UDP 转发"复选框：它和"跟随全局"叠在同一格里
-        // （.check-stack），实测 1442px，没有越过 1450。
-        // 这是新增内容，不是排版退化，所以门槛跟着走；但新增块自身单独设上界，
+        // 本轮的基线：把"菜单栏可切换的模式"并进"模式"卡（少一张卡），实测 1409px。
+        // 历史门槛：1275 → 1450（新增"命令行代理"块）→ 本轮合并后收回到 1435。
+        // 阈值 = 实测 + 约 26px 余量。新增块自身仍单独设上界（见下），
         // 免得以后悄悄膨胀还被这条总高度断言吸收掉。
-        check(modesPage.mainScroll.scroll <= 1450,
-            '模式与代理页内容高 ≤ 1450px（基线 1498；含新增"命令行代理"块，实测 ' + modesPage.mainScroll.scroll + '）');
+        check(modesPage.mainScroll.scroll <= 1435,
+            '模式与代理页内容高 ≤ 1435px（合并"菜单栏可切换的模式"后基线 1409，实测 ' + modesPage.mainScroll.scroll + '）');
         check(modesPage.cliBlockHeight > 0 && modesPage.cliBlockHeight <= 200,
             '"命令行代理"块高度受控 ≤ 200px（实测 ' + modesPage.cliBlockHeight + 'px）');
         const cols = modesPage.blocks.filter(function (b) { return b.cls === 'card'; });
@@ -569,6 +568,13 @@ async function main() {
             return c.left === cols[0].left && c.width === cols[0].width;
         }), '模式与代理页保持单列，没有改成分栏 (' + cols.length + ' 张卡)');
         check(modesPage.blocks.every(function (b) { return b.top >= 0; }), '模式与代理页没有元素被挤出视口上方');
+        // 合并后的"模式"卡：5 个模式单选 + 4 个切换模式复选框同处一张卡，
+        // 后者在宽窗固定两列（2+2），不能排成 3+1 留一个孤格。
+        check(modesPage.modeCardHasSwitch === true,
+            '"菜单栏可切换的模式"与模式单选合并进同一张卡 (' + modesPage.modeCardHasSwitch + ')');
+        check(modesPage.switchCheckRows === 2 && modesPage.switchSwitchCols === 2,
+            '切换模式 4 项在宽窗排成 2×2 (' + modesPage.switchCheckRows + ' 行 × ' +
+            modesPage.switchSwitchCols + ' 列)');
         density.push('模式与代理页内容高 ' + modesPage.mainScroll.scroll + 'px / 视口 ' + modesPage.mainScroll.client + 'px，' +
             cols.length + ' 张卡片');
         density.push('状态页内容高 ' + status.mainScroll.scroll + 'px / 视口 ' + status.mainScroll.client + 'px');
@@ -629,8 +635,46 @@ async function main() {
         check(menuActs.indexOf('move-server-1:off') >= 0 && menuActs.indexOf('move-server1:on') >= 0 &&
             menuActs.indexOf('export-server:on') >= 0,
             '菜单项复用既有动作且首行上移禁用 (' + menuActs + ')');
-        await evaluate('document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}))');
+
+        // 4c2) 菜单的键盘可达性：打开后焦点进菜单，方向键在可用项间循环，
+        //      Home/End 到首尾，Escape 收起并把焦点还给触发按钮。
+        //      首行的"上移"是禁用的，所以可用项只有 2 个（下移、复制链接）。
+        const activeAct = 'document.activeElement && document.activeElement.dataset ? ' +
+            '(document.activeElement.dataset.act + (document.activeElement.dataset.delta || "")) : ""';
+        const focus0 = await evaluate(activeAct);
+        check(focus0 === 'move-server1',
+            '打开菜单后焦点落在第一个可用项 (' + focus0 + ')');
+
+        const arrow = 'document.dispatchEvent(new KeyboardEvent("keydown", {key: "%K", bubbles: true}));';
+        await evaluate(arrow.replace('%K', 'ArrowDown'));
+        await new Promise(function (r) { setTimeout(r, 30); });
+        check(await evaluate(activeAct) === 'export-server', '↓ 移到下一项 (' + await evaluate(activeAct) + ')');
+        await evaluate(arrow.replace('%K', 'ArrowDown'));
+        await new Promise(function (r) { setTimeout(r, 30); });
+        check(await evaluate(activeAct) === 'move-server1', '↓ 在末尾后循环回第一项 (' + await evaluate(activeAct) + ')');
+        await evaluate(arrow.replace('%K', 'ArrowUp'));
+        await new Promise(function (r) { setTimeout(r, 30); });
+        check(await evaluate(activeAct) === 'export-server', '↑ 从第一项回到末尾 (' + await evaluate(activeAct) + ')');
+        await evaluate(arrow.replace('%K', 'Home'));
+        await new Promise(function (r) { setTimeout(r, 30); });
+        check(await evaluate(activeAct) === 'move-server1', 'Home 回到第一项 (' + await evaluate(activeAct) + ')');
+        await evaluate(arrow.replace('%K', 'End'));
+        await new Promise(function (r) { setTimeout(r, 30); });
+        check(await evaluate(activeAct) === 'export-server', 'End 到最后一个可用项 (' + await evaluate(activeAct) + ')');
+
+        // 禁止项永远不该拿到焦点，方向键也不能停在它上面。
+        check(await evaluate('document.activeElement.disabled === true') === false,
+            '方向键不会把焦点停在禁用项上');
+        await evaluate(arrow.replace('%K', 'Escape'));
         await new Promise(function (r) { setTimeout(r, 60); });
+        const escFocus = await evaluate('JSON.stringify({' +
+            'open: !!document.querySelector(".menu"),' +
+            'act: document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.act : "",' +
+            'expanded: (document.querySelector(\'[data-act="row-more"]\') || {}).ariaExpanded || ""})');
+        const escFocusObj = JSON.parse(escFocus);
+        check(!escFocusObj.open && escFocusObj.act === 'row-more',
+            'Escape 收起菜单并把焦点还给"更多"按钮 (' + escFocus + ')');
+        check(escFocusObj.expanded === 'false', '键盘收起后 aria-expanded=false (' + escFocusObj.expanded + ')');
 
         // 4d) 诊断页：桩修好后表格才真的渲染，这里把它纳入检查
         await evaluate('window.__ui.selectView("diag")');
@@ -716,6 +760,69 @@ async function main() {
         check(await evaluate('window.__UI_LOG_STATE().count') === twiceLogs,
             '迟到的低 seq 日志被水位线挡掉');
 
+        // 后端现在按 ~100ms 成批推送（ssxng:logs）。批次内部的去重必须与逐条一致：
+        // 一批里既有新的、重复的、也有迟到的旧行。
+        await evaluate('window.__UI_PUSH_LOGS([' +
+            '{seq: 920001, message: "批次新行 A"},' +
+            '{seq: 920002, message: "批次新行 B"},' +
+            '{seq: 900001, message: "批次里的重复行"},' +
+            '{seq: 5, message: "批次里迟到的旧行"}])');
+        await new Promise(function (r) { setTimeout(r, 60); });
+        const afterBatch = await evaluate('window.__UI_LOG_STATE().count');
+        check(afterBatch === twiceLogs + 2,
+            '批量推送只在同一批里记下新的 2 行 (期望 ' + (twiceLogs + 2) + '，实际 ' + afterBatch + ')');
+        // 批次里靠后的行不能覆盖靠后水位线：再来一批"序号更低"的整批必须全部被挡掉。
+        await evaluate('window.__UI_PUSH_LOGS([{seq: 920000, message: "整批迟到"}])');
+        await new Promise(function (r) { setTimeout(r, 40); });
+        check(await evaluate('window.__UI_LOG_STATE().count') === afterBatch,
+            '整批序号都低于水位线时一条都不记');
+
+        // 状态页"最近连接"：proxy 日志成批到达时不能每来一条就重建一次 DOM，
+        // 但也必须在 ~250ms 内落到最新内容。用 MutationObserver 数重建次数。
+        await evaluate('window.__ui.selectView("status")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        await evaluate('(function(){var b=document.getElementById("recent-proxy");' +
+            'window.__UI_RECENT_MUT=0;' +
+            'if(window.__UI_RECENT_OBS){window.__UI_RECENT_OBS.disconnect();}' +
+            'window.__UI_RECENT_OBS=new MutationObserver(function(ms){window.__UI_RECENT_MUT+=ms.length;});' +
+            'window.__UI_RECENT_OBS.observe(b,{childList:true,subtree:true});' +
+            'for(var i=0;i<40;i++){' +
+            'window.__UI_PUSH_LOG({seq: 930000+i, scope: "proxy", message: "连接测试 " + i});}' +
+            'return true;})()');
+        // 节流窗口是 250ms：稍等一下只允许落到一次（最多两次时钟误差）。
+        await new Promise(function (r) { setTimeout(r, 400); });
+        const muts = await evaluate('(function(){if(window.__UI_RECENT_OBS){window.__UI_RECENT_OBS.disconnect();window.__UI_RECENT_OBS=null;}return window.__UI_RECENT_MUT;})()');
+        check(muts > 0 && muts <= 2,
+            '状态页"最近连接"按节流重建，40 条 proxy 日志只重建 ' + muts + ' 次（≤2）');
+        const recentTop = await evaluate('(function(){var b=document.getElementById("recent-proxy");' +
+            'var t=b&&b.querySelector(".row-sub");return t?t.textContent:"";})()');
+        check(recentTop.indexOf('连接测试 39') >= 0,
+            '"最近连接"最终显示最新一条 (' + recentTop + ')');
+
+        // 视图滚动位置的记忆：切走再切回服务器页要回到原来的位置，而不是停在别处。
+        // 目标值取"实际可滚动范围"内的一半，否则内容不够高时会被浏览器钳到最大值，
+        // 断言就变成了在测量钳位而不是在测量记忆。
+        await evaluate('window.__ui.selectView("servers")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        const wantScroll = await evaluate('(function(){var m=document.querySelector(".main");' +
+            'var max=m.scrollHeight-m.clientHeight;var top=Math.floor(max/2);m.scrollTop=top;return [top,max];})()');
+        const targetScroll = wantScroll[0];
+        check(targetScroll > 0, '服务器页可以滚动出足够的高度 (最大 ' + wantScroll[1] + 'px)');
+        await evaluate('window.__ui.selectView("logs")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        await evaluate('window.__ui.selectView("servers")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        const backScroll = await evaluate('document.querySelector(".main").scrollTop');
+        check(backScroll === targetScroll,
+            '切走再切回视图会恢复原来的滚动位置 (' + backScroll + '/' + targetScroll + ')');
+        // 切到日志页仍然按既有语义直接置底（follow），不能被"恢复位置"覆盖。
+        await evaluate('window.__ui.selectView("logs")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        const logFollow = await evaluate('(function(){var m=document.querySelector(".main");' +
+            'return m.scrollHeight-m.clientHeight-m.scrollTop;})()');
+        check(logFollow <= 2, '切到日志页仍然自动置底 (距底部 ' + logFollow + 'px)');
+        await evaluate('(function(){document.querySelector(".main").scrollTop=0;return true;})()');
+
         // 往上翻之后，一次状态推送不能把滚动位置重置到底部。
         // 必须先塞满日志让列表真的可滚动：内容不足时 scrollTop 恒为 0，
         // 断言会在"没有回归"和"有回归"两种情况下都通过，等于白测。
@@ -735,6 +842,28 @@ async function main() {
         const keptTop = await evaluate('window.__UI_LOG_STATE().scrolled');
         check(keptTop <= 1, '状态推送不会把翻到顶部的日志列表顶回底部 (scrollTop=' + keptTop + ')');
         density.push('日志去重按 seq 水位线，重渲染保留滚动位置');
+
+        // 4g1b) 批次被丢弃后的补齐：一条日志只写进后端、不推事件（订阅缓冲满时
+        //       后端就是这个行为）。切到日志页会带水位线调一次 GetLogs，
+        //       这条必须补出来，且不能重复。
+        const beforeCatchUp = await evaluate('window.__UI_LOG_STATE().count');
+        await evaluate('window.__UI_BACKEND_LOG({seq: 940001, level: "error", scope: "pac", message: "被丢弃的批次里的行"})');
+        await evaluate('window.__ui.selectView("status")');
+        await new Promise(function (r) { setTimeout(r, 80); });
+        const notYet = await evaluate('window.__UI_LOG_STATE().count');
+        check(notYet === beforeCatchUp, '未推送的日志不会凭空出现在界面 (' + notYet + ')');
+        await evaluate('window.__ui.selectView("logs")');
+        await new Promise(function (r) { setTimeout(r, 150); });
+        const caught = await evaluate('window.__UI_LOG_STATE().count');
+        check(caught === beforeCatchUp + 1,
+            '切到日志页按水位线补齐被丢弃的日志 (' + beforeCatchUp + ' -> ' + caught + ')');
+        // 再切一次不能把同一行补第二遍。
+        await evaluate('window.__ui.selectView("status")');
+        await new Promise(function (r) { setTimeout(r, 60); });
+        await evaluate('window.__ui.selectView("logs")');
+        await new Promise(function (r) { setTimeout(r, 150); });
+        check(await evaluate('window.__UI_LOG_STATE().count') === caught,
+            '补齐按 seq 去重，反复切页不会重复计入');
 
         // 4g2) 复选框一次交互只处理一次。浏览器对复选框会同时派发 input 与 change；
         //      两个事件都绑到同一个处理器时，每次勾选都会跑两遍（下拉框那条路更明显，

@@ -10,7 +10,7 @@ ShadowsocksX-NG 的 gfwlist2pac/abp.js。
 ```
 ┌──────────────────────────────────────────────┐
 │  Wails (macOS WebView)  frontend/src/*.js    │
-│        ▲ 事件 ssxng:state/log/traffic/toast  │
+│        ▲ 事件 ssxng:state/logs/traffic/toast │
 │        ▼ window.go.main.App.<Method>()       │
 │  app*.go / apply.go       菜单栏图标 (Cocoa)  │
 │  ┌──────────────┬─────────────────────────┐  │
@@ -126,7 +126,14 @@ make uninstall      # 卸载助手与登录项；PURGE=1 时连用户配置一�
 
 ```bash
 go test ./...        # 单元 + 集成测试（本机起 Shadowsocks 服务端跑真实流量）
+make test-race       # 同上，但开竞态检测（用 .gocache-race 独立构建缓存，见 Makefile）
 ```
+
+`make test-race` 用 `GOCACHE=$(pwd)/.gocache-race` 而不是默认缓存：`-race` 的产物和普通产物
+挤在同一个缓存里时，`go test -race` 会偶发地以 `runtime/race: package testmain: cannot find
+package`（或某个缓存文件 `operation not permitted`）失败，重新构建一遍就恢复——那是缓存的问题，
+不是代码的问题。独立缓存让这条命令可复现。缓存目录不可写时用
+`make test-race RACE_CACHE=/tmp/ssxng-race-cache`。
 
 ```bash
 scripts/ui-check.sh   # 界面自检：无头 Chromium 渲染真实前端文件后做几何与对比度断言
@@ -139,13 +146,18 @@ scripts/tray-check.sh # 菜单栏自检：无界面编译真实的 tray_darwin.m
 窗口标题栏/拖动区几何（品牌与视图内容都在标题栏之下）、980/880/700 三档宽度下无横向溢出、
 深浅两套主题里所有文字元素的前景/背景对比度（正文 ≥ 4.5:1、大字 ≥ 3:1）、6 个视图都渲染出内容、
 `main.css` 里没有硬编码颜色且所有 `var(--x)` 都有定义。除此之外还有**版面密度护栏**：
-"状态页 ≤ 820px、模式与代理页 ≤ 1450px 内容高（基线分别是 970 / 1498）"、
+"状态页 ≤ 820px、模式与代理页 ≤ 1435px 内容高（基线分别是 970 / 1409）"、
 "模式与代理页必须保持单列"、"模式单选的说明在窄窗下仍与标题同行"、"8 个节点时服务器页
 700px ≤1200px / 980px ≤760px、单行 ≤80px、每行 4 个动作 + 1 个更多"——密度是最容易被下一次
 改动悄悄退回去的东西，所以让它在自检里报错。截图落在 `/tmp/ssxng-ui-shots/`。
 
-自检还会**真的点开**"更多"菜单，验证它出现/含 3 项/`aria-expanded` 正确/点空白与 Escape 收起，
-以及诊断页点"运行检查"后表格确实渲染出行且无横向溢出。（`scripts/ui-check/stub.js` 的返回形状
+自检还会**真的点开**"更多"菜单，验证它出现/含 3 项/`aria-expanded` 正确/点空白、Escape 收起，
+以及键盘路径（打开后焦点进第一个可用项、↑↓ 循环、Home/End、Escape 把焦点还给触发按钮）；
+诊断页点"运行检查"后表格确实渲染出行且无横向溢出。日志那条路也覆盖了批量语义：一批里混入
+重复行与迟到的旧行只能记下新的、整批低于水位线时一条都不记、状态页"最近连接"在 40 条 proxy
+日志下最多重建 2 次（节流）、被丢弃的批次在切到日志页时按 `seq` 补齐且反复切页不重复。
+视图滚动位置也有断言：切走再切回恢复到原位置，日志页仍按既有语义置底。
+（`scripts/ui-check/stub.js` 的返回形状
 必须与 `internal/api/types.go`、`app*.go` 一致——写错会被前端的容错解析静默吞掉，让整块内容
 永远不被检查。）自检还会静态校验前端四个脚本的接线：加载顺序必须是
 `i18n → core → views → actions → app`、每个脚本各自一个 IIFE（不泄漏全局、不用 ES 模块）、

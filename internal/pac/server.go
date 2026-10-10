@@ -1,11 +1,11 @@
 package pac
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -163,50 +163,36 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	_, _ = io.Copy(w, strings.NewReader(string(content)))
+	// Write the bytes straight out. The previous io.Copy(strings.NewReader(
+	// string(content))) converted the whole file — hundreds of kilobytes — to a
+	// string just to copy it, on every request.
+	if _, err := w.Write(content); err != nil {
+		s.lastE.Store(err.Error())
+	}
 }
 
 // RuleCountFromPAC is a helper for the UI: it counts the entries of the JSON
 // array embedded in a generated PAC file.
+//
+// It searches the raw bytes rather than converting the file to a string, which
+// for a real gfwlist means avoiding a copy of several hundred kilobytes on
+// every state push.
 func RuleCountFromPAC(content []byte) int {
-	const marker = "var rules = "
-	s := string(content)
-	i := strings.Index(s, marker)
+	marker := []byte("var rules = ")
+	i := bytes.Index(content, marker)
 	if i < 0 {
 		return 0
 	}
-	rest := s[i+len(marker):]
-	end := strings.Index(rest, "];")
+	rest := content[i+len(marker):]
+	end := bytes.Index(rest, []byte("];"))
 	if end < 0 {
 		return 0
 	}
 	var rules []string
-	if err := json.Unmarshal([]byte(rest[:end+1]), &rules); err != nil {
+	if err := json.Unmarshal(rest[:end+1], &rules); err != nil {
 		return 0
 	}
 	return len(rules)
-}
-
-// PACHostPort extracts the SOCKS5 endpoint written into a PAC file.
-func PACHostPort(content []byte) (string, int, bool) {
-	s := string(content)
-	i := strings.Index(s, "SOCKS5 ")
-	if i < 0 {
-		return "", 0, false
-	}
-	rest := s[i+len("SOCKS5 "):]
-	if j := strings.IndexByte(rest, ';'); j >= 0 {
-		rest = rest[:j]
-	}
-	host, portStr, err := net.SplitHostPort(rest)
-	if err != nil {
-		return "", 0, false
-	}
-	var port int
-	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
-		return "", 0, false
-	}
-	return strings.Trim(host, "[]"), port, true
 }
 
 // ParseCacheBustedURL returns the PAC URL without its cache busting query,

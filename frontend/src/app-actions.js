@@ -140,6 +140,8 @@
             if (!Number.isFinite(val)) val = 0;
         } else val = el.value;
         ed.view[key] = val;
+        // 编辑中的密码也算"已知密码"，抹除缓存要跟着失效。
+        if (key === 'password') S.invalidateSecretCache();
         refreshEditorFeedback();
     }
 
@@ -192,22 +194,30 @@
         if (App.view === 'modes') renderView(true);
     }
 
-    async function loadLogs() {
-        const r = await call('GetLogs', 0);
-        if (!r.ok) return;
+    // 拉取日志并与本地镜像合并。
+    //
+    // afterSeq 走水位线：启动时 App.logSeq 为 0，后端返回最近 500 条；切到日志页
+    // 或手动刷新时带上当前水位线，只取真正缺的那些。日志事件是成批推送的，批次
+    // 在缓冲满时可能被丢弃，这一步是界面补齐的唯一手段，所以不能只跑一次。
+    async function refreshLogs() {
+        const r = await call('GetLogs', num(App.logSeq, 0));
+        if (!r.ok) return 0;
         const fetched = arr(r.value).map(logEntry).slice(-LOG_LIMIT);
-        if (!fetched.length) return;
-        // A live ssxng:log line can land before this response does. Merging by
-        // seq keeps both instead of dropping the whole backlog — loadLogs only
-        // ever runs once, so anything discarded here is lost for good.
+        if (!fetched.length) return 0;
+        // A live batch can land before this response does. Merging by seq keeps
+        // both instead of dropping the whole backlog.
         const seen = new Set(App.logs.map((e) => e.seq));
         const missing = fetched.filter((e) => !seen.has(e.seq));
-        if (!missing.length) return;
+        if (!missing.length) return 0;
         App.logs = missing.concat(App.logs).sort((a, b) => a.seq - b.seq).slice(-LOG_LIMIT);
         const maxSeq = App.logs.reduce((m, e) => (e.seq > m ? e.seq : m), 0);
         if (maxSeq > App.logSeq) App.logSeq = maxSeq;
         if (App.view === 'logs') renderView(true);
+        return missing.length;
     }
+
+    // 启动时拉一次完整镜像（afterSeq=0 时后端返回最近 500 条）。
+    function loadLogs() { return refreshLogs(); }
 
     function saveSettings(apply) {
         const d = ensureDraft();
@@ -253,8 +263,22 @@
         'goto-servers': () => setView('servers'),
 
         'row-more': (el, id) => {
-            App.menu = (App.menu && App.menu.id === id) ? null : {id: id};
+            const open = App.menu && App.menu.id === id;
+            if (open) {
+                // 收起：焦点回到刚才的触发按钮，键盘用户不会"掉"在页面某处。
+                App.menu = null;
+                App.menuId = id;
+                renderView(true);
+                const btn = S.$('[data-act="row-more"][data-id="' + id + '"]');
+                if (btn) btn.focus();
+                return;
+            }
+            App.menu = {id: id};
+            App.menuId = id;
             renderView(true);
+            // 打开后把焦点放进第一个可用菜单项：否则方向键无从谈起。
+            const first = S.$('.menu [data-act]:not([disabled])');
+            if (first) first.focus();
         },
 
         'goto-modes': () => setView('modes'),
@@ -465,7 +489,7 @@
 
     /* 对后面加载的脚本公开的接口 */
     Object.assign(S, {
-        ACTIONS, loadLogs, loadServices, refreshSettingsFeedback, updateDraftField,
+        ACTIONS, loadLogs, loadServices, refreshLogs, refreshSettingsFeedback, updateDraftField,
         updateEditorField, updateServiceToggle, validateServer
     });
 })();

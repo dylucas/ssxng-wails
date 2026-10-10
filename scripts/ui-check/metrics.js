@@ -276,6 +276,34 @@
                     return b ? Math.round(b.getBoundingClientRect().height) : 0;
                 })(),
                 cliHTTPOff: !!text(view, '.cli-block .hint'),
+                // "模式"卡：4 个"菜单栏可切换的模式"复选框是否与该卡的模式单选同处一张卡，
+                // 以及它们排成几行几列（宽窗要求 2×2，窄窗回退单列）。
+                modeCardHasSwitch: (function () {
+                    if (!view) return false;
+                    const cards = view.querySelectorAll('.card');
+                    for (let i = 0; i < cards.length; i++) {
+                        const radios = cards[i].querySelectorAll('.radio').length;
+                        const switchBox = cards[i].querySelector('input[data-key="enablePAC"]');
+                        if (radios > 0 && switchBox) return true;
+                    }
+                    return false;
+                })(),
+                switchCheckRows: (function () {
+                    const list = view ? view.querySelector('.check-list.is-2col') : null;
+                    if (!list) return 0;
+                    const tops = {};
+                    Array.prototype.forEach.call(list.children, function (el) {
+                        tops[Math.round(el.getBoundingClientRect().top)] = 1;
+                    });
+                    return Object.keys(tops).length;
+                })(),
+                switchSwitchCols: (function () {
+                    const list = view ? view.querySelector('.check-list.is-2col') : null;
+                    if (!list) return 0;
+                    const raw = String(getComputedStyle(list).gridTemplateColumns || '').trim();
+                    if (!raw || raw === 'none') return 1;
+                    return raw.split(/\s+/).length;
+                })(),
                 clipboard: window.__CLIPBOARD ? window.__CLIPBOARD.text : null,
                 clipboardCount: window.__CLIPBOARD ? window.__CLIPBOARD.count : 0,
                 // 诊断表格

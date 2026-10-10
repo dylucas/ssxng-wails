@@ -1298,6 +1298,21 @@ textarea.input {
     gap: 2px;
 }
 
+/* 卡片内的次级小标题（如"模式"卡里的"菜单栏可切换的模式"）：比 .card-title
+   小一号、不占整行标题的视觉权重，这样就不必为它单开一张卡。 */
+.card-sub-title {
+    margin: 12px 0 6px;
+    color: var(--text-2);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+/* 四个一组的复选框固定两列：auto-fit 会按文案宽窄把它们排成 3+1，
+   末尾留一格空洞；两列是 2+2，页高更省也不出孤行。窄窗回退单列。 */
+.check-list.is-2col {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .form-errors:empty {
     display: none;
 }
@@ -1595,5 +1610,10 @@ textarea.input {
 
     .log-scope {
         display: none;
+    }
+
+    /* 窄窗下一律单列：两列会把中文标签挤到换行，反而更高。 */
+    .check-list.is-2col {
+        grid-template-columns: minmax(0, 1fr);
     }
 }
