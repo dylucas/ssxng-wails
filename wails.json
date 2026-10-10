@@ -1,0 +1,18 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "SSXNG",
+  "assetdir": "frontend/src",
+  "outputfilename": "SSXNG",
+  "wailsjsdir": "./frontend",
+  "author": {
+    "name": "ydong",
+    "email": "ydong@travelsky.com.cn"
+  },
+  "info": {
+    "companyName": "SSXNG",
+    "productName": "SSXNG",
+    "productVersion": "1.0.0",
+    "copyright": "GPL-3.0-or-later",
+    "comments": "Shadowsocks 客户端（Apple Silicon）"
+  }
+}
